@@ -292,7 +292,9 @@ class _ProjectTabiAppState extends State<ProjectTabiApp> with WidgetsBindingObse
     final update = AppUpdateController.instance;
     final navigator = _navigatorKey.currentState;
     if (!mounted || !update.hasUpdate || update.version == _notifiedUpdate ||
-        navigator == null || navigator.canPop() || UpdateActivity.busy) return;
+        navigator == null || navigator.canPop() || UpdateActivity.busy) {
+      return;
+    }
     _notifiedUpdate = update.version;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;

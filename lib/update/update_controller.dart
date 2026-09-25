@@ -16,6 +16,9 @@ class AppUpdateController extends ChangeNotifier {
   String currentVersion = projectTabiAppVersion;
   String? error;
   int lastCheck = 0;
+  String? _knownUpdate;
+  int _revision = 0;
+  Future<void> _preferenceTail = Future.value();
   Future<void>? _initializing;
   Timer? _timer;
   bool _commandBusy = false;
@@ -40,6 +43,7 @@ class AppUpdateController extends ChangeNotifier {
       autoCheck = value['autoCheck'] != false;
       wifiAutoDownload = value['wifiAutoDownload'] == true;
       lastCheck = (value['lastCheck'] as num?)?.toInt() ?? 0;
+      _knownUpdate = value['knownUpdate'] as String?;
     } catch (_) {
       // A corrupt preference file does not prevent manual updates.
     }
@@ -58,7 +62,8 @@ class AppUpdateController extends ChangeNotifier {
     if (!supported) return;
     await _poll();
     if (autoCheck && !busy && !hasUpdate &&
-        DateTime.now().millisecondsSinceEpoch - lastCheck > const Duration(days: 1).inMilliseconds) {
+        ((_knownUpdate != null && phase == 'idle') ||
+         DateTime.now().millisecondsSinceEpoch - lastCheck > const Duration(days: 1).inMilliseconds)) {
       await check(automatic: true);
     }
   }
@@ -75,14 +80,22 @@ class AppUpdateController extends ChangeNotifier {
     if (wifiAutoDownload && phase == 'available') await startDownload(wifiOnly: true);
   }
 
-  Future<void> _persistPreferences() => syncStoreWrite('app_update_preferences', jsonEncode({
-    'autoCheck': autoCheck, 'wifiAutoDownload': wifiAutoDownload, 'lastCheck': lastCheck,
-  }));
+  Future<void> _persistPreferences() {
+    final encoded = jsonEncode({
+      'autoCheck': autoCheck, 'wifiAutoDownload': wifiAutoDownload,
+      'lastCheck': lastCheck, 'knownUpdate': _knownUpdate,
+    });
+    final write = _preferenceTail.then((_) => syncStoreWrite('app_update_preferences', encoded));
+    _preferenceTail = write.catchError((Object _) {});
+    return write;
+  }
 
   Future<void> check({bool automatic = false}) async {
     await initialize();
     if (busy || !supported || {'waiting', 'ready'}.contains(phase)) return;
     await _run('check');
+    if (phase == 'current') _knownUpdate = null;
+    if (hasUpdate) _knownUpdate = version;
     // Also throttle unreachable servers; a manual check is always available.
     lastCheck = DateTime.now().millisecondsSinceEpoch;
     try { await _persistPreferences(); } catch (_) { /* Keep update result. */ }
@@ -105,6 +118,7 @@ class AppUpdateController extends ChangeNotifier {
   Future<void> _run(String action, {bool wifiOnly = false, bool allowBusy = false}) async {
     if (_commandBusy || (!allowBusy && busy)) return;
     _commandBusy = true;
+    _revision++;
     error = null;
     if (action == 'check') state = {...state, 'phase': 'checking'};
     notifyListeners();
@@ -125,8 +139,11 @@ class AppUpdateController extends ChangeNotifier {
   Future<void> _poll() async {
     if (_polling || _commandBusy || !supportsAppUpdates) return;
     _polling = true;
+    final revision = _revision;
     try {
-      state = await updateCommand('status');
+      final next = await updateCommand('status');
+      if (revision != _revision) return;
+      state = next;
       error = state['error'] as String?;
       notifyListeners();
     } catch (_) { /* A transient poll failure must not interrupt an active download. */ }
