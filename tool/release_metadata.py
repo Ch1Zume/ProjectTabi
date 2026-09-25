@@ -65,7 +65,7 @@ def main():
     (args.assets / "latest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     Path("RELEASE_NOTES.md").write_text(
         f"## ProjectTabi {name} · 构建 {build}\n\n" + changelog +
-        "\n\n已安装旧版的用户需先手动覆盖安装本次版本；后续更新可通过“设置 → 关于 ProjectTabi → 应用更新”完成。\n",
+        "\n\n已安装 0.1.1（构建 3）或更新版本的用户，可通过“设置 → 关于 ProjectTabi → 应用更新”下载安装；更早版本需先手动覆盖安装。\n",
         encoding="utf-8")
 
 

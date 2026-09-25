@@ -11,6 +11,8 @@ ProjectTabi 是一款面向 Windows 和 Android 的圣地巡礼计划与记录�
 
 ## 平台与更新
 
+Android 提供参考图拍摄，详细选项集中在“设置 → 拍摄设置”。Windows 提供计划、地图、记录查看和同步，不显示相机入口或拍摄设置。
+
 每个 Release 提供 Windows NSIS 安装包（`*-windows-setup.exe`）和 Android APK。Windows 安装包用于安装和后续覆盖更新；Android APK 使用固定的应用 ID 和发布签名，未来版本以递增版本号安装更新。
 
 从 0.1.1 构建 3 起，打开应用会自动检查更新，也可进入“设置 → 关于 ProjectTabi → 应用更新”查看更新说明、下载安装包。支持可选的仅 Wi-Fi 自动下载，安装前仍由用户确认。已安装更早构建的用户需先手动覆盖安装一次。

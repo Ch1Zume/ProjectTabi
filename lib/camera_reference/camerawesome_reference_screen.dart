@@ -806,7 +806,7 @@ class _NativeCameraController extends ChangeNotifier {
     void clear() {
       if (identical(_configurationFuture, task)) _configurationFuture = null;
     }
-    task.then((_) => clear(), onError: (Object _, StackTrace __) => clear());
+    task.then((_) => clear(), onError: (Object _, StackTrace _) => clear());
     return task;
   }
 
