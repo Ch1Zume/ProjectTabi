@@ -2,7 +2,7 @@
 
 ## 新版本发布
 
-1. 更新 pubspec.yaml 中的版本，例如从 0.1.0+1 改为 0.1.1+2。点号前的部分用于版本名称，+ 后面的整数是 Android versionCode，每次 Android 更新必须递增。
+1. 更新 pubspec.yaml 中的版本，例如从 0.1.1+3 改为 0.1.2+4。+ 前的部分用于版本名称，+ 后面的整数是 Android versionCode，每次 Android 更新必须递增。
 2. 将 lib/app_version.dart、src-tauri/Cargo.toml 和 src-tauri/tauri.conf.json 改为相同的完整版本，例如 0.1.1+3，并更新 Cargo.lock 与 iOS 构建号。
 3. 将 PATCH_NOTES.md 中的待发布内容归入新版本，并补上本次问题与修复。
 4. 提交变更、推送，并创建匹配版本的 Git 标签，例如 v0.1.2；同一版本的补充构建使用 v0.1.1-build.3，保留已发布标签及其安装包。

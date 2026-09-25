@@ -75,8 +75,10 @@ class _CameraQualitySettingsState extends State<CameraQualitySettings> {
             onPressed: () async {
               await Clipboard.setData(ClipboardData(text:
                 '记录时间：${preferences.observedAt ?? '未知'}\n${last.diagnostics}'));
-              if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('相机信息已复制')));
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('相机信息已复制')));
+              }
             },
           ),
         ],
