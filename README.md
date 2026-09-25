@@ -5,6 +5,7 @@ ProjectTabi 是一款面向 Windows 和 Android 的圣地巡礼计划与记录�
 - [下载更新包（GitHub Releases）](https://github.com/Ch1Zume/ProjectTabi/releases)
 - [使用指南](docs/USAGE.md)
 - [WebDAV 同步说明](docs/WEBDAV_SYNC.md)
+- [参考图拍摄与画质](docs/CAMERA_QUALITY.md)
 - [补丁记录](PATCH_NOTES.md)
 - [反馈问题](https://github.com/Ch1Zume/ProjectTabi/issues)
 

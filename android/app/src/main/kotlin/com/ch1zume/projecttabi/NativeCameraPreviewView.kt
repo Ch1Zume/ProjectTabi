@@ -579,7 +579,9 @@ class NativeCameraPreviewView(
         if (lensMode == NativeLensMode.BackTelephoto) telephotoCamera?.relativeFocalLength ?: 1.0 else 1.0
 
     private fun qualityStateMap(): Map<String, Any> {
-        val cameraId = camera?.cameraInfo?.let { Camera2CameraInfo.from(it).cameraId } ?: ""
+        val cameraId = runCatching {
+            camera?.cameraInfo?.let { Camera2CameraInfo.from(it).cameraId }
+        }.getOrNull() ?: "系统未提供"
         val lens = when (lensMode) {
             NativeLensMode.BackTelephoto -> "长焦"
             NativeLensMode.Front -> "前置"
@@ -603,7 +605,7 @@ class NativeCameraPreviewView(
                 "镜头: $lens / cameraId=$cameraId",
                 "独立长焦: ${telephotoCamera ?: "未检测到可访问镜头"}",
                 "当前物理镜头: ${if (lensMode == NativeLensMode.BackTelephoto) telephotoCamera?.physicalCameraId ?: "独立相机" else "由系统选择"}",
-                "预览实际镜头: $reportedPhysicalCamera / 实际焦距(mm): $reportedFocalLength",
+                "系统报告的活动物理镜头: $reportedPhysicalCamera / 报告焦距(mm): $reportedFocalLength",
                 "增强请求: $requestedEnhancement / 实际: $activeEnhancement",
                 "可用增强: ${supportedEnhancements.joinToString().ifEmpty { "无" }}",
                 "变焦: ${camera?.cameraInfo?.zoomState?.value?.zoomRatio} / 光学倍率估计: ${zoomScale()}",
