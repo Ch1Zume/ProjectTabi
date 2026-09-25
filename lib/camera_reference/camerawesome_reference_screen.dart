@@ -810,6 +810,12 @@ class _NativeCameraController extends ChangeNotifier {
     }
   }
 
+  Future<CameraQualityState> refreshQuality() async {
+    final state = await _channel?.invokeMapMethod<String, Object?>('getZoomState');
+    _applyZoomState(state);
+    return _quality!;
+  }
+
   Future<void> configureCapture({
     required double captureAspectRatio,
     required bool cropCaptureToAspectRatio,
@@ -932,7 +938,11 @@ class _NativeCameraController extends ChangeNotifier {
       final path = await channel.invokeMethod<String>('takePicture', {
         if (location != null) ...location.toPlatformArguments(),
       });
-      _applyZoomState(await channel.invokeMapMethod<String, Object?>('getZoomState'));
+      try {
+        _applyZoomState(await channel.invokeMapMethod<String, Object?>('getZoomState'));
+      } catch (_) {
+        // A diagnostics refresh must never discard a successfully saved photo.
+      }
       return path;
     } on PlatformException catch (error) {
       operationMessage = error.message ?? '照片拍摄失败，请重试。';
@@ -1491,6 +1501,7 @@ class _NativeCameraQualityButton extends StatelessWidget {
           builder: (_) => CameraQualitySheet(
             state: quality,
             onSelectMode: controller.setEnhancementMode,
+            onRefresh: controller.refreshQuality,
           ),
         );
       },

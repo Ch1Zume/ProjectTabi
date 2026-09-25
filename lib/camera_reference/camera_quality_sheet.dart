@@ -10,6 +10,7 @@ class CameraQualityState {
     required this.notice,
     required this.outputSize,
     required this.diagnostics,
+    this.telephotoAvailable = false,
   });
 
   final String requestedMode;
@@ -19,6 +20,7 @@ class CameraQualityState {
   final String notice;
   final String outputSize;
   final String diagnostics;
+  final bool telephotoAvailable;
 
   static CameraQualityState? fromPlatform(Object? value) {
     if (value is! Map) return null;
@@ -32,6 +34,7 @@ class CameraQualityState {
       notice: value['notice'] as String? ?? '',
       outputSize: value['outputSize'] as String? ?? '',
       diagnostics: value['diagnostics'] as String? ?? '',
+      telephotoAvailable: value['telephotoAvailable'] == true,
     );
   }
 
@@ -51,11 +54,13 @@ class CameraQualitySheet extends StatefulWidget {
   const CameraQualitySheet({
     required this.state,
     required this.onSelectMode,
+    this.onRefresh,
     super.key,
   });
 
   final CameraQualityState state;
   final Future<CameraQualityState> Function(String) onSelectMode;
+  final Future<CameraQualityState> Function()? onRefresh;
 
   @override
   State<CameraQualitySheet> createState() => _CameraQualitySheetState();
@@ -100,6 +105,9 @@ class _CameraQualitySheetState extends State<CameraQualitySheet> {
             const SizedBox(height: 12),
             Text('当前镜头：${_state.lensLabel} · ${_state.activeLabel}'),
             if (_state.outputSize.isNotEmpty) Text('拍摄分辨率：${_state.outputSize}'),
+            Text(_state.telephotoAvailable
+                ? '已检测到长焦，可通过拍摄页的“切换镜头”选择。'
+                : '未检测到可独立切换的长焦，后置自动的镜头选择由系统决定。'),
             const SizedBox(height: 12),
             for (final mode in const ['auto', 'hdr', 'night', 'off'])
               ListTile(
@@ -125,7 +133,15 @@ class _CameraQualitySheetState extends State<CameraQualitySheet> {
               icon: const Icon(Icons.copy),
               label: const Text('复制相机信息'),
               onPressed: _changing ? null : () async {
-                await Clipboard.setData(ClipboardData(text: _state.diagnostics));
+                var current = _state;
+                try {
+                  current = await widget.onRefresh?.call() ?? _state;
+                } catch (_) {
+                  // Keep the last known information if the camera has closed.
+                }
+                if (!context.mounted) return;
+                setState(() => _state = current);
+                await Clipboard.setData(ClipboardData(text: current.diagnostics));
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('相机信息已复制，可用于反馈画质问题。')),

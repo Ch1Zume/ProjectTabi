@@ -1,6 +1,6 @@
 [package]
 name = "projecttabi-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "ProjectTabi desktop launcher"
 authors = ["Ch1Zume"]
 license = "MIT"
