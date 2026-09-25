@@ -5181,7 +5181,7 @@ class _AppIconMark extends StatelessWidget {
           ),
         ],
       ),
-      child: Image.asset('icon.jpg', fit: BoxFit.cover),
+      child: Image.asset('assets/projecttabi_icon.png', fit: BoxFit.cover),
     );
   }
 }
