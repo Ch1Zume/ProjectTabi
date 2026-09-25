@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../desktop/tauri_bridge.dart';
 import 'update_controller.dart';
 
 class AppUpdateScreen extends StatefulWidget {
@@ -19,7 +21,9 @@ class _AppUpdateScreenState extends State<AppUpdateScreen> {
   Future<void> _install() async {
     final confirm = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
       title: const Text('安装更新'),
-      content: const Text('更新将关闭应用。已保存的记录、照片和同步设置会保留。'),
+      content: Text(isTauriLauncherAvailable
+          ? '更新将关闭应用，完成后重新启动。已保存的记录、照片和同步设置会保留。'
+          : '将打开系统安装程序，请按提示完成更新。已保存的记录、照片和同步设置会保留。'),
       actions: [
         TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('稍后')),
         FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('立即更新')),
@@ -69,11 +73,13 @@ class _AppUpdateScreenState extends State<AppUpdateScreen> {
           if (c.hasUpdate && !downloading && c.phase != 'ready')
             OutlinedButton(onPressed: c.busy ? null : () => c.check(), child: const Text('重新检查')),
           if (c.phase == 'ready')
-            FilledButton(onPressed: c.busy ? null : _install, child: const Text('安装更新'))
+            FilledButton(onPressed: c.busy ? null : _install,
+              child: Text(isTauriLauncherAvailable ? '更新并重启' : '安装更新'))
           else if (downloading)
             OutlinedButton(onPressed: c.phase == 'verifying' ? null : c.cancelDownload, child: const Text('取消下载'))
           else if (c.hasUpdate && c.phase != 'checking')
-            FilledButton(onPressed: c.busy ? null : () => c.startDownload(), child: const Text('下载更新／重试'))
+            FilledButton(onPressed: c.busy ? null : () => c.startDownload(),
+              child: Text(c.phase == 'error' ? '重新下载' : '下载更新'))
           else
             FilledButton(onPressed: c.busy || !c.supported ? null : () => c.check(), child: const Text('检查更新')),
           TextButton(onPressed: () async {
@@ -96,7 +102,7 @@ class _AppUpdateScreenState extends State<AppUpdateScreen> {
           const Divider(height: 36),
           Text('更新内容', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
-          SelectableText(c.notes),
+          MarkdownBody(data: c.notes, selectable: true),
         ],
       ]);
     }),
