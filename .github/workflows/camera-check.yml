@@ -26,7 +26,7 @@ jobs:
       - name: Check camera Dart code
         run: flutter analyze lib/camera_reference/camera_quality_sheet.dart lib/camera_reference/camerawesome_reference_screen.dart test/camera_quality_sheet_test.dart
       - name: Camera and record regression tests
-        run: flutter test test/camera_quality_sheet_test.dart test/camera_capture_aspect_ratio_test.dart test/camera_storage_test.dart test/visit_record_confirmation_screen_test.dart test/visit_record_gallery_backup_test.dart test/photo_location_test.dart test/platform_version_consistency_test.dart
+        run: flutter test test/camera_quality_sheet_test.dart test/camera_capture_aspect_ratio_test.dart test/camera_photo_orientation_test.dart test/camera_storage_test.dart test/visit_record_confirmation_screen_test.dart test/visit_record_gallery_backup_test.dart test/photo_location_test.dart test/platform_version_consistency_test.dart
       - name: Compile Android camera integration
         env:
           PROJECT_TABI_UNSIGNED_CHECK: '1'
