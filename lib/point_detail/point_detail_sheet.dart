@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:image_picker/image_picker.dart';
+import '../camera_reference/camera_platform.dart';
 
 import '../app_theme.dart';
 import '../data/user_reference_image_stub.dart'
@@ -651,7 +652,7 @@ class _PointDetailActions extends StatelessWidget {
         externalKey: const ValueKey('point-detail-external-navigation-button'),
         dividerKey: const ValueKey('point-detail-navigation-button-divider'),
       ),
-      if (scope == PointDetailActionScope.visit && onOpenCamera != null) ...[
+      if (supportsReferenceCamera && scope == PointDetailActionScope.visit && onOpenCamera != null) ...[
         OutlinedButton(
           onPressed: onOpenCamera,
           style: actionStyle,

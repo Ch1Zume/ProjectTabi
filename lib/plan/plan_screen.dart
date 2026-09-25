@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import '../camera_reference/camera_platform.dart';
 import '../app_theme.dart';
 import '../map/map_colors.dart';
 import '../data/pilgrimage_repository.dart';
@@ -531,6 +532,7 @@ class _PlanScreenState extends State<PlanScreen>
   }
 
   void _openCamera(BuildContext context, PilgrimagePoint point) {
+    if (!supportsReferenceCamera) return;
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => CamerawesomeReferenceScreen(
@@ -2048,7 +2050,7 @@ class _PlanPointTile extends StatelessWidget {
                       : LucideIcons.check,
                 ),
               ),
-              IconButton(
+              if (supportsReferenceCamera) IconButton(
                 tooltip: '拍摄参考',
                 onPressed: onOpenCamera,
                 icon: SizedBox(

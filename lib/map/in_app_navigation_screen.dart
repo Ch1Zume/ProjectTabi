@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
+import '../camera_reference/camera_platform.dart';
 
 import '../app_theme.dart';
 import '../camera_reference/camerawesome_reference_screen.dart';
@@ -426,6 +427,7 @@ class _InAppNavigationScreenState extends State<InAppNavigationScreen>
   }
 
   void _openReferenceCamera(PilgrimagePoint point) {
+    if (!supportsReferenceCamera) return;
     Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => CamerawesomeReferenceScreen(
@@ -1528,8 +1530,8 @@ class _ArrivalSheet extends StatelessWidget {
               title: arrived.name,
               subtitle: _destinationSubtitle(arrived),
             ),
-            const SizedBox(height: 10),
-            _InfoRow(
+            if (supportsReferenceCamera) const SizedBox(height: 10),
+            if (supportsReferenceCamera) _InfoRow(
               key: const ValueKey('in-app-navigation-open-camera'),
               chrome: chrome,
               icon: LucideIcons.camera,
