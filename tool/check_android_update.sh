@@ -42,11 +42,11 @@ package_info() {
 }
 
 identity() {
-  printf '%s' "$1" | sed -n "s/.*name='\([^']*\)'.*/\1/p"
+  printf '%s' "$1" | sed -n "s/^package: name='\([^']*\)'.*/\1/p"
 }
 
 version_code() {
-  printf '%s' "$1" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p"
+  printf '%s' "$1" | sed -n "s/^package: .*versionCode='\([^']*\)'.*/\1/p"
 }
 
 if ! current_cert=$(certificate "$current_apk"); then
@@ -60,6 +60,7 @@ current_id=$(identity "$current_info")
 current_version=$(version_code "$current_info")
 
 if [[ "$current_id" != 'com.ch1zume.projecttabi' ]]; then
+  printf 'APK package metadata: %s\n' "$current_info" >&2
   printf 'Unexpected Android package ID: expected com.ch1zume.projecttabi, found %s.\n' "${current_id:-<missing>}" >&2
   exit 1
 fi
