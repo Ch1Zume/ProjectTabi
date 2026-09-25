@@ -58,9 +58,9 @@ jobs:
         run: |
           current_apk=build/app/outputs/flutter-apk/app-release.apk
           if [ -n "$PREVIOUS_APK" ]; then
-            tool/check_android_update.sh "$current_apk" "$PREVIOUS_APK"
+            bash tool/check_android_update.sh "$current_apk" "$PREVIOUS_APK"
           else
-            tool/check_android_update.sh "$current_apk"
+            bash tool/check_android_update.sh "$current_apk"
           fi
       - name: Package APK
         run: cp build/app/outputs/flutter-apk/app-release.apk "ProjectTabi-$GITHUB_REF_NAME.apk"
