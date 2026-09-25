@@ -13,6 +13,9 @@ import '../app_version.dart';
 import '../update/update_controller.dart';
 import '../update/update_screen.dart';
 import '../camera_reference/camera_zoom_capabilities.dart';
+import '../camera_reference/camera_platform.dart';
+import '../camera_reference/camera_preferences.dart';
+import '../camera_reference/camera_quality_settings.dart';
 import '../data/pilgrimage_repository.dart';
 import '../data/reference_cache_cleanup.dart';
 import '../data/valhalla_service_config.dart';
@@ -75,7 +78,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
-    _loadZoomCapabilities();
+    if (supportsReferenceCamera) _loadZoomCapabilities();
     _loadAppVersionLabel();
     if (_shouldShowDesktopSection) {
       _loadDesktopLauncherInfo();
@@ -188,12 +191,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ],
           ),
+          if (supportsReferenceCamera) ...[
           const SizedBox(height: 12),
           _SettingsCard(
             header: _SettingsCardHeader(
               icon: LucideIcons.camera,
               title: '拍摄设置',
-              subtitle: '照片比例、参考图比例、备份等',
+              subtitle: '画质、照片比例、定位与备份',
               onTap: () => _pushDetail(
                 _CameraSettingsPage(
                   settings: settings,
@@ -236,7 +240,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _SummarySwitchTile(
                   icon: LucideIcons.cloudUpload,
                   title: '照片备份',
-                  subtitle: '保存巡礼照片到相册',
+                  subtitle: '仅备份应用内新拍照片',
                   value: settings.saveVisitPhotoToGallery,
                   onChanged: (value) {
                     widget.onChanged(
@@ -246,6 +250,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
             ],
           ),
+          ],
           const SizedBox(height: 12),
           _SettingsCard(
             header: _SettingsCardHeader(
@@ -392,6 +397,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     const settings = AppSettings();
     ComparisonExportConfig.lastUsed = const ComparisonExportConfig();
     await widget.repository.saveAppSettings(settings);
+    if (supportsReferenceCamera) await CameraPreferences.instance.select('auto');
     widget.onChanged(settings);
     if (mounted) {
       ScaffoldMessenger.of(
@@ -906,6 +912,10 @@ class _CameraSettingsPageState extends State<_CameraSettingsPage> {
       uiScale: settings.uiScale,
       fontScale: settings.fontScale,
       children: [
+        if (defaultTargetPlatform == TargetPlatform.android) ...[
+          const _SettingsSection(title: '拍摄画质', children: [CameraQualitySettings()]),
+          const SizedBox(height: 12),
+        ],
         _SettingsSection(
           title: '\u62cd\u6444\u56fe\u7247\u6bd4\u4f8b',
           titleSpacing: 6,
@@ -1076,7 +1086,7 @@ class _CameraSettingsPageState extends State<_CameraSettingsPage> {
                   color: AppColors.textSecondary,
                 ),
                 title: Text('保存巡礼照片到相册', style: _titleTextStyle),
-                subtitle: Text('保存记录时同时备份一张巡礼照片。', style: _secondaryTextStyle),
+                subtitle: Text('仅备份应用内新拍照片；相册导入的原照片不会重复保存。', style: _secondaryTextStyle),
                 value: settings.saveVisitPhotoToGallery,
                 onChanged: (value) {
                   _update(settings.copyWith(saveVisitPhotoToGallery: value));
@@ -1092,7 +1102,7 @@ class _CameraSettingsPageState extends State<_CameraSettingsPage> {
 
 String _photoLocationStrategyDescription(PhotoLocationStrategy strategy) {
   return switch (strategy) {
-    PhotoLocationStrategy.askOnFirstCapture => '第一次按下快门时选择。定位仅写入照片，不使用点位坐标。',
+    PhotoLocationStrategy.askOnFirstCapture => '尚未设置，拍摄时不写入定位。可在此选择定位方式。',
     PhotoLocationStrategy.disabled => '不申请照片定位权限，也不向照片写入 GPS 信息。',
     PhotoLocationStrategy.useRecentLocation =>
       '拍摄时优先使用设备最近的有效定位；没有可用定位时尝试获取一次。',
@@ -1102,7 +1112,7 @@ String _photoLocationStrategyDescription(PhotoLocationStrategy strategy) {
 
 String _photoLocationStrategyBadge(PhotoLocationStrategy strategy) {
   return switch (strategy) {
-    PhotoLocationStrategy.askOnFirstCapture => '询问',
+    PhotoLocationStrategy.askOnFirstCapture => '未设置',
     PhotoLocationStrategy.disabled => '关闭',
     PhotoLocationStrategy.useRecentLocation => '最近',
     PhotoLocationStrategy.waitOnConfirmation => '推荐',
@@ -1111,6 +1121,7 @@ String _photoLocationStrategyBadge(PhotoLocationStrategy strategy) {
 
 String _photoLocationStrategyMenuLabel(PhotoLocationStrategy strategy) {
   return switch (strategy) {
+    PhotoLocationStrategy.askOnFirstCapture => '未设置（不写入定位）',
     PhotoLocationStrategy.waitOnConfirmation => '确认记录时获取定位',
     _ => strategy.label,
   };

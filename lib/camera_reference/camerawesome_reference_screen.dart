@@ -31,10 +31,11 @@ import 'camera_storage_stub.dart'
 import 'auto_comparison_gallery_backup.dart';
 import 'camera_zoom_capabilities.dart';
 import 'camera_quality_sheet.dart';
+import 'camera_preferences.dart';
+import 'camera_platform.dart';
 import 'gallery_capture_time_stub.dart'
     if (dart.library.io) 'gallery_capture_time_io.dart';
 import 'photo_location.dart';
-import 'photo_location_choice_sheet.dart';
 import 'reference_image_bytes_stub.dart'
     if (dart.library.io) 'reference_image_bytes_io.dart'
     as reference_image_bytes;
@@ -85,7 +86,6 @@ class _CamerawesomeReferenceScreenState
   bool _referenceAspectRatioLoading = false;
   int _referenceAspectRatioRequest = 0;
   late PhotoLocationStrategy _photoLocationStrategy;
-  Future<PhotoLocationStrategy?>? _photoLocationStrategyRequest;
 
   String? get _remoteReferenceImageUrl => hasRemoteReferenceImage(widget.point)
       ? anitabiFullResolutionImageUrl(widget.point.referenceImageUrl)
@@ -104,11 +104,6 @@ class _CamerawesomeReferenceScreenState
       DeviceOrientation.landscapeRight,
     ]);
     _refreshReferenceAspectRatio();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
-        unawaited(_ensurePhotoLocationStrategy());
-      }
-    });
   }
 
   @override
@@ -214,6 +209,7 @@ class _CamerawesomeReferenceScreenState
       capturedAtOverride: capturedAt,
       restoreLandscape: restoreLandscape,
       applyPhotoLocation: false,
+      importedFromGallery: true,
     );
     if (mounted) {
       setState(() => _galleryImage = null);
@@ -255,6 +251,7 @@ class _CamerawesomeReferenceScreenState
     DateTime? capturedAtOverride,
     bool? restoreLandscape,
     bool applyPhotoLocation = true,
+    bool importedFromGallery = false,
   }) async {
     if (!mounted) {
       return null;
@@ -273,6 +270,7 @@ class _CamerawesomeReferenceScreenState
               point: widget.point,
               controller: widget.controller,
               photoPath: photoPath,
+              importedFromGallery: importedFromGallery,
               referenceMode: _mode.label,
               referenceBytes: _localReferenceBytes,
               referenceImagePath: widget.point.referenceFullImagePath,
@@ -289,6 +287,7 @@ class _CamerawesomeReferenceScreenState
               writePhotoLocation: _nativeCameraController.writePhotoLocation,
               saveVisitPhotoToGallery: shouldAutoSaveVisitPhotoToGallery(
                 widget.settings,
+                importedFromGallery: importedFromGallery,
               ),
               autoSaveComparisonToGallery: shouldAutoSaveComparisonToGallery(
                 widget.settings,
@@ -312,22 +311,6 @@ class _CamerawesomeReferenceScreenState
   }
 
   Future<PhotoLocationStrategy?> _ensurePhotoLocationStrategy() async {
-    final activeRequest = _photoLocationStrategyRequest;
-    if (activeRequest != null) {
-      return activeRequest;
-    }
-    final request = _resolvePhotoLocationStrategy();
-    _photoLocationStrategyRequest = request;
-    try {
-      return await request;
-    } finally {
-      if (identical(_photoLocationStrategyRequest, request)) {
-        _photoLocationStrategyRequest = null;
-      }
-    }
-  }
-
-  Future<PhotoLocationStrategy?> _resolvePhotoLocationStrategy() async {
     if (_photoLocationStrategy == PhotoLocationStrategy.askOnFirstCapture) {
       final persistedSettings = await widget.controller?.repository
           ?.loadAppSettings();
@@ -337,31 +320,9 @@ class _CamerawesomeReferenceScreenState
         _photoLocationStrategy = persistedStrategy;
       }
     }
-    if (_photoLocationStrategy != PhotoLocationStrategy.askOnFirstCapture) {
-      return _photoLocationStrategy;
-    }
-    if (!mounted) {
-      return null;
-    }
-
-    final selected = await showModalBottomSheet<PhotoLocationStrategy>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (context) => const PhotoLocationChoiceSheet(),
-    );
-    if (selected == null || !mounted) {
-      return null;
-    }
-
-    setState(() => _photoLocationStrategy = selected);
-    final repository = widget.controller?.repository;
-    if (repository != null) {
-      await repository.saveAppSettings(
-        widget.settings.copyWith(photoLocationStrategy: selected),
-      );
-    }
-    return selected;
+    // Legacy "ask" preferences stay private until chosen in Settings.
+    return _photoLocationStrategy == PhotoLocationStrategy.askOnFirstCapture
+        ? PhotoLocationStrategy.disabled : _photoLocationStrategy;
   }
 
   Future<PhotoLocationData?> _resolveRecentLocationForCapture(
@@ -421,6 +382,9 @@ class _CamerawesomeReferenceScreenState
 
   @override
   Widget build(BuildContext context) {
+    if (!supportsReferenceCamera) {
+      return const Scaffold(body: Center(child: Text('请在手机端拍摄，记录可通过云端同步。')));
+    }
     final referenceFullImagePath = widget.point.referenceFullImagePath;
     final reference = _ReferenceImageSource(
       bytes: _localReferenceBytes,
@@ -688,6 +652,8 @@ Future<double?> _decodeImageAspectRatio(Uint8List bytes) async {
 }
 
 class _NativeCameraController extends ChangeNotifier {
+  final previewKey = GlobalKey(debugLabel: 'reference-camera-preview');
+  var _connectionGeneration = 0;
   MethodChannel? _channel;
   int? _viewId;
   var _ready = false;
@@ -725,48 +691,64 @@ class _NativeCameraController extends ChangeNotifier {
   String get lensMode => _lensMode;
   bool get supportsTelephoto => _supportsTelephoto;
   bool get configuringCapture => _configuringCapture;
-  CameraQualityState? get quality => _quality;
 
-  Future<void> attach(int viewId) async {
-    if (_channel != null && _viewId == viewId) {
+  Future<void> attach(int viewId, {bool reconnect = false}) async {
+    if (_disposed || (!reconnect && _channel != null && _viewId == viewId)) {
       return;
     }
-
-    if (_channel != null) {
-      await _channel!.invokeMethod<void>('dispose');
-      _channel = null;
-      _ready = false;
-    }
-
-    if (defaultTargetPlatform == TargetPlatform.android) {
-      final permission = await Permission.camera.request();
-      if (!permission.isGranted) {
-        _error = '需要相机权限';
-        notifyListeners();
-        return;
-      }
-    }
-
+    final connection = ++_connectionGeneration;
+    _zoomRequest++;
+    _ready = false;
+    _busy = false;
+    _configuringCapture = false;
+    _configurationFuture = null;
+    _error = null;
     _viewId = viewId;
     _appliedCaptureAspectRatio = null;
     _appliedCropCaptureToAspectRatio = null;
     _appliedInitialZoomRatio = null;
-    _channel = MethodChannel('seichi/native_camera_preview_$viewId');
+    final channel = MethodChannel('seichi/native_camera_preview_$viewId');
+    _channel = channel;
+    notifyListeners();
     try {
-      final result = await _channel!.invokeMapMethod<String, Object?>(
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        final permission = await Permission.camera.request();
+        if (!permission.isGranted) {
+          throw PlatformException(code: 'camera_permission', message: '需要相机权限，请允许后重试。');
+        }
+      }
+      await CameraPreferences.instance.load();
+      if (_disposed || connection != _connectionGeneration) return;
+      final ratio = _captureAspectRatio;
+      final crop = _cropCaptureToAspectRatio;
+      final result = await channel.invokeMapMethod<String, Object?>(
         'initialize',
-        {'targetAspectRatio': _captureAspectRatio},
-      );
+        {'targetAspectRatio': ratio, 'cropCaptureToAspectRatio': crop,
+         'enhancementMode': CameraPreferences.instance.mode},
+      ).timeout(const Duration(seconds: 25));
+      if (_disposed || connection != _connectionGeneration) return;
       _applyZoomState(result);
       _ready = true;
       _error = null;
-      await _runCaptureConfiguration();
+      _appliedCaptureAspectRatio = ratio;
+      if (defaultTargetPlatform == TargetPlatform.android) _appliedCropCaptureToAspectRatio = crop;
+      await _ensureCaptureConfiguration();
+      unawaited(CameraPreferences.instance.remember(_quality));
     } on PlatformException catch (error) {
+      if (_disposed || connection != _connectionGeneration) return;
+      _ready = false;
       _error = error.message ?? '原生相机初始化失败';
-    } catch (error) {
-      _error = '原生相机初始化失败：$error';
+    } catch (_) {
+      if (_disposed || connection != _connectionGeneration) return;
+      _ready = false;
+      _error = '相机连接未完成，请点击重新连接；也可关闭其他占用相机的应用后重试。';
     }
     notifyListeners();
+  }
+
+  Future<void> reconnect() async {
+    final id = _viewId;
+    if (id != null) await attach(id, reconnect: true);
   }
 
   Future<void> setZoomRatio(double ratio) async {
@@ -782,38 +764,14 @@ class _NativeCameraController extends ChangeNotifier {
       final result = await channel.invokeMapMethod<String, Object?>(
         'setZoomRatio',
         {'zoomRatio': _zoomRatio},
-      );
-      if (request == _zoomRequest) _applyZoomState(result);
+      ).timeout(const Duration(seconds: 12));
+      if (!_disposed && identical(channel, _channel) && request == _zoomRequest) _applyZoomState(result);
     } on PlatformException catch (error) {
       operationMessage = error.message ?? '变焦调整失败，请稍后重试。';
+    } catch (_) {
+      operationMessage = '变焦未完成，请等待预览恢复后重试。';
     }
     notifyListeners();
-  }
-
-  Future<CameraQualityState> setEnhancementMode(String mode) async {
-    final channel = _channel;
-    if (channel == null || !_ready || _busy) {
-      throw PlatformException(code: 'camera_busy', message: '相机正在处理中，请稍后再试。');
-    }
-    await (_configurationFuture ?? Future<void>.value());
-    _busy = true;
-    notifyListeners();
-    try {
-      final result = await channel.invokeMapMethod<String, Object?>(
-        'setEnhancementMode', {'mode': mode},
-      );
-      _applyZoomState(result);
-      return _quality!;
-    } finally {
-      _busy = false;
-      notifyListeners();
-    }
-  }
-
-  Future<CameraQualityState> refreshQuality() async {
-    final state = await _channel?.invokeMapMethod<String, Object?>('getZoomState');
-    _applyZoomState(state);
-    return _quality!;
   }
 
   Future<void> configureCapture({
@@ -837,37 +795,19 @@ class _NativeCameraController extends ChangeNotifier {
     _cropCaptureToAspectRatio = cropCaptureToAspectRatio;
     _preferredInitialZoomRatio = safeZoom;
     _configurationGeneration += 1;
-    _configurationFuture ??= _runCaptureConfiguration().whenComplete(() {
-      _configurationFuture = null;
-    });
-    return _configurationFuture!;
+    if (_busy) return _configurationFuture ?? Future<void>.value();
+    return _ensureCaptureConfiguration();
   }
 
-  Future<void> setCaptureAspectRatio(double ratio) async {
-    final safeRatio = ratio <= 0 ? 1.0 : ratio;
-    if ((_captureAspectRatio - safeRatio).abs() < 0.001) {
-      return;
+  Future<void> _ensureCaptureConfiguration() {
+    if (_configurationFuture case final pending?) return pending;
+    final task = _runCaptureConfiguration();
+    _configurationFuture = task;
+    void clear() {
+      if (identical(_configurationFuture, task)) _configurationFuture = null;
     }
-
-    _captureAspectRatio = safeRatio;
-    final channel = _channel;
-    if (channel == null || !_ready) {
-      return;
-    }
-    await channel.invokeMethod<void>('setTargetAspectRatio', {
-      'targetAspectRatio': _captureAspectRatio,
-    });
-  }
-
-  Future<void> setCropCaptureToAspectRatio(bool enabled) async {
-    _cropCaptureToAspectRatio = enabled;
-    final channel = _channel;
-    if (channel == null || !_ready) {
-      return;
-    }
-    await channel.invokeMethod<void>('setCropCaptureToAspectRatio', {
-      'enabled': enabled,
-    });
+    task.then((_) => clear(), onError: (Object _, StackTrace __) => clear());
+    return task;
   }
 
   Future<void> cycleFlashMode() async {
@@ -886,9 +826,13 @@ class _NativeCameraController extends ChangeNotifier {
       return;
     }
 
-    _flashMode = mode;
+    try {
+      await channel.invokeMethod<void>('setFlashMode', {'flashMode': mode}).timeout(const Duration(seconds: 10));
+      if (!_disposed && identical(channel, _channel)) _flashMode = mode;
+    } catch (_) {
+      operationMessage = '闪光灯设置失败，请稍后重试。';
+    }
     notifyListeners();
-    await channel.invokeMethod<void>('setFlashMode', {'flashMode': mode});
   }
 
   Future<void> switchCamera() async {
@@ -902,22 +846,37 @@ class _NativeCameraController extends ChangeNotifier {
     }
 
     _busy = true;
+    _zoomRequest++;
     notifyListeners();
     try {
       final result = await channel.invokeMapMethod<String, Object?>(
         'switchLens',
-      );
+      ).timeout(const Duration(seconds: 25));
+      if (_disposed || !identical(channel, _channel)) return;
       _applyZoomState(result);
       _appliedInitialZoomRatio = null;
-      await _runCaptureConfiguration();
+      await _ensureCaptureConfiguration();
+      unawaited(CameraPreferences.instance.remember(_quality));
     } on PlatformException catch (error) {
       operationMessage = error.message ?? '镜头切换失败，请稍后重试。';
-      final result = await channel.invokeMapMethod<String, Object?>(
-        'getZoomState',
-      );
-      _applyZoomState(result);
+      try {
+        final result = await channel.invokeMapMethod<String, Object?>(
+          'getZoomState',
+        ).timeout(const Duration(seconds: 10));
+        if (!_disposed && identical(channel, _channel)) _applyZoomState(result);
+      } catch (_) {
+        if (!_disposed && identical(channel, _channel)) {
+          _ready = false;
+          _error = '镜头连接未恢复，请重新连接相机。';
+        }
+      }
+    } catch (_) {
+      if (!_disposed && identical(channel, _channel)) {
+        _ready = false;
+        _error = '镜头切换未完成，请重新连接相机。';
+      }
     } finally {
-      _busy = false;
+      if (identical(channel, _channel)) _busy = false;
     }
     notifyListeners();
   }
@@ -927,19 +886,17 @@ class _NativeCameraController extends ChangeNotifier {
     if (channel == null || !_ready || _busy) {
       return null;
     }
-    await (_configurationFuture ?? _runCaptureConfiguration());
-    if (_configuringCapture) {
-      return null;
-    }
-
     _busy = true;
     notifyListeners();
     try {
+      await _ensureCaptureConfiguration();
+      if (_disposed || !identical(channel, _channel) || !_ready) return null;
       final path = await channel.invokeMethod<String>('takePicture', {
         if (location != null) ...location.toPlatformArguments(),
-      });
+      }).timeout(const Duration(seconds: 75));
       try {
-        _applyZoomState(await channel.invokeMapMethod<String, Object?>('getZoomState'));
+        final state = await channel.invokeMapMethod<String, Object?>('getZoomState').timeout(const Duration(seconds: 5));
+        if (!_disposed && identical(channel, _channel)) _applyZoomState(state);
       } catch (_) {
         // A diagnostics refresh must never discard a successfully saved photo.
       }
@@ -947,8 +904,16 @@ class _NativeCameraController extends ChangeNotifier {
     } on PlatformException catch (error) {
       operationMessage = error.message ?? '照片拍摄失败，请重试。';
       return null;
+    } on TimeoutException {
+      _ready = false;
+      _error = '相机长时间没有响应，请重新连接后重试。';
+      return null;
+    } catch (_) {
+      operationMessage = '相机连接已变化，请等待预览恢复后重试。';
+      return null;
     } finally {
-      _busy = false;
+      if (identical(channel, _channel)) _busy = false;
+      unawaited(CameraPreferences.instance.remember(_quality));
       notifyListeners();
     }
   }
@@ -975,9 +940,11 @@ class _NativeCameraController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _connectionGeneration++;
     _ready = false;
     _channel?.invokeMethod<void>('dispose').catchError((_) {});
     _channel = null;
+    unawaited(CameraPreferences.instance.remember(_quality));
     super.dispose();
   }
 
@@ -989,6 +956,10 @@ class _NativeCameraController extends ChangeNotifier {
   void _applyZoomState(Map<String, Object?>? state) {
     if (state == null) {
       return;
+    }
+    if (state['ready'] == false) {
+      _ready = false;
+      _error = '相机连接已中断，请重新连接后重试。';
     }
 
     _minZoomRatio = (state['minZoomRatio'] as num?)?.toDouble() ?? 1;
@@ -1003,6 +974,7 @@ class _NativeCameraController extends ChangeNotifier {
 
   Future<void> _runCaptureConfiguration() async {
     final channel = _channel;
+    final connection = _connectionGeneration;
     if (channel == null || !_ready) {
       return;
     }
@@ -1011,7 +983,7 @@ class _NativeCameraController extends ChangeNotifier {
     notifyListeners();
     try {
       var appliedGeneration = -1;
-      while (appliedGeneration != _configurationGeneration) {
+      while (!_disposed && connection == _connectionGeneration && appliedGeneration != _configurationGeneration) {
         final generation = _configurationGeneration;
         final captureAspectRatio = _captureAspectRatio;
         final cropCaptureToAspectRatio = _cropCaptureToAspectRatio;
@@ -1021,14 +993,16 @@ class _NativeCameraController extends ChangeNotifier {
             0.001) {
           await channel.invokeMethod<void>('setTargetAspectRatio', {
             'targetAspectRatio': captureAspectRatio,
-          });
+          }).timeout(const Duration(seconds: 20));
+          if (_disposed || connection != _connectionGeneration) return;
           _appliedCaptureAspectRatio = captureAspectRatio;
         }
 
         if (_appliedCropCaptureToAspectRatio != cropCaptureToAspectRatio) {
           await channel.invokeMethod<void>('setCropCaptureToAspectRatio', {
             'enabled': cropCaptureToAspectRatio,
-          });
+          }).timeout(const Duration(seconds: 20));
+          if (_disposed || connection != _connectionGeneration) return;
           _appliedCropCaptureToAspectRatio = cropCaptureToAspectRatio;
         }
 
@@ -1038,7 +1012,8 @@ class _NativeCameraController extends ChangeNotifier {
             final result = await channel.invokeMapMethod<String, Object?>(
               'setZoomRatio',
               {'zoomRatio': clampedZoom},
-            );
+            ).timeout(const Duration(seconds: 12));
+            if (_disposed || connection != _connectionGeneration) return;
             _applyZoomState(result);
             _appliedInitialZoomRatio = clampedZoom;
           }
@@ -1046,10 +1021,20 @@ class _NativeCameraController extends ChangeNotifier {
 
         appliedGeneration = generation;
       }
-      _applyZoomState(await channel.invokeMapMethod<String, Object?>('getZoomState'));
+      final state = await channel.invokeMapMethod<String, Object?>('getZoomState').timeout(const Duration(seconds: 10));
+      if (!_disposed && connection == _connectionGeneration) _applyZoomState(state);
+    } catch (_) {
+      if (!_disposed && connection == _connectionGeneration) {
+        _ready = false;
+        _error = '相机设置未能完成，请重新连接后重试。';
+        operationMessage = '相机设置应用失败，请重试；预览未恢复时可重新连接相机。';
+      }
+      rethrow;
     } finally {
-      _configuringCapture = false;
-      notifyListeners();
+      if (!_disposed && connection == _connectionGeneration) {
+        _configuringCapture = false;
+        notifyListeners();
+      }
     }
   }
 }
@@ -1109,14 +1094,15 @@ class _NativeReferenceCameraBody extends StatelessWidget {
             }
           });
         }
-        unawaited(
-          controller.configureCapture(
-            captureAspectRatio: captureAspectRatio,
-            cropCaptureToAspectRatio: cropCaptureToAspectRatio,
-            preferredInitialZoomRatio: settings.cameraMinZoom,
-          ),
-        );
-        if (controller.error != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!context.mounted) return;
+          unawaited(controller.configureCapture(
+              captureAspectRatio: captureAspectRatio,
+              cropCaptureToAspectRatio: cropCaptureToAspectRatio,
+              preferredInitialZoomRatio: settings.cameraMinZoom,
+            ).catchError((Object _) {}));
+        });
+        if (controller.error != null && defaultTargetPlatform == TargetPlatform.iOS) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             onNativeUnavailable();
           });
@@ -1263,7 +1249,7 @@ class _NativeCameraStage extends StatelessWidget {
                           height: frameHeight,
                           child: _AspectStageFrame(
                             aspectRatio: captureAspectRatio,
-                            child: _NativeCameraPreview(controller: controller),
+                            child: _NativeCameraPreview(key: controller.previewKey, controller: controller),
                           ),
                         ),
                       ],
@@ -1284,7 +1270,7 @@ class _NativeCameraStage extends StatelessWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                _NativeCameraPreview(controller: controller),
+                _NativeCameraPreview(key: controller.previewKey, controller: controller),
                 if (reference.hasImage)
                   IgnorePointer(
                     child: Opacity(
@@ -1346,17 +1332,32 @@ class _AspectStageFrame extends StatelessWidget {
 }
 
 class _NativeCameraPreview extends StatelessWidget {
-  const _NativeCameraPreview({required this.controller});
+  const _NativeCameraPreview({required this.controller, super.key});
 
   final _NativeCameraController controller;
 
   @override
   Widget build(BuildContext context) {
     if (defaultTargetPlatform == TargetPlatform.android) {
-      return AndroidView(
-        viewType: 'seichi/native_camera_preview',
-        onPlatformViewCreated: controller.attach,
-      );
+      return Stack(fit: StackFit.expand, children: [
+        AndroidView(
+          viewType: 'seichi/native_camera_preview',
+          onPlatformViewCreated: controller.attach,
+        ),
+        if (!controller.ready)
+          ColoredBox(color: Colors.black87, child: Center(
+            child: controller.error == null
+                ? const CircularProgressIndicator()
+                : SingleChildScrollView(child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      Text(controller.error!, textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white)),
+                      TextButton(onPressed: controller.reconnect, child: const Text('重新连接相机')),
+                    ]),
+                  )),
+          )),
+      ]);
     }
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       return UiKitView(
@@ -1473,42 +1474,6 @@ class _CameraLayoutMetrics {
   }
 }
 
-class _NativeCameraQualityButton extends StatelessWidget {
-  const _NativeCameraQualityButton({required this.controller, this.size = 44});
-
-  final _NativeCameraController controller;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    final quality = controller.quality;
-    if (quality == null) return const SizedBox.shrink();
-    return _CameraCircleButton(
-      size: size,
-      tooltip: '拍摄画质：${quality.lensLabel} · ${quality.activeLabel}',
-      icon: LucideIcons.sparkles,
-      text: '画质',
-      badge: switch (quality.activeMode) {
-        'hdr' => 'HDR', 'night' => 'N', 'auto' => 'A', _ => null,
-      },
-      onPressed: () {
-        if (controller.busy || controller.configuringCapture) return;
-        showModalBottomSheet<void>(
-          context: context,
-          isScrollControlled: true,
-          useSafeArea: true,
-          showDragHandle: true,
-          builder: (_) => CameraQualitySheet(
-            state: quality,
-            onSelectMode: controller.setEnhancementMode,
-            onRefresh: controller.refreshQuality,
-          ),
-        );
-      },
-    );
-  }
-}
-
 class _NativeCameraTopBar extends StatelessWidget {
   const _NativeCameraTopBar({
     required this.controller,
@@ -1535,8 +1500,6 @@ class _NativeCameraTopBar extends StatelessWidget {
             onPressed: () => Navigator.of(context).maybePop(),
           ),
           const Spacer(),
-          _NativeCameraQualityButton(controller: controller),
-          const SizedBox(width: 8),
           _CameraCircleButton(
             tooltip: '参考图',
             icon: LucideIcons.image,
@@ -1780,12 +1743,6 @@ class _NativeLandscapeLeftRail extends StatelessWidget {
                 icon: LucideIcons.image,
                 onPressed: onPickReference,
               ),
-              if (controller.quality != null) ...[
-                SizedBox(height: metrics.leftGap),
-                _NativeCameraQualityButton(
-                  controller: controller, size: metrics.controlButtonSize,
-                ),
-              ],
               SizedBox(height: metrics.leftGap + 2),
               _ModeColumnSelector(
                 metrics: metrics,

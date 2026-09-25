@@ -11,6 +11,8 @@ import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.location.Location
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Rational
 import android.view.MotionEvent
 import android.view.Surface
@@ -67,6 +69,12 @@ class NativeCameraPreviewView(
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
     private var imageCapture: ImageCapture? = null
+    private var preview: Preview? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var initializationGeneration = 0
+    private var captureGeneration = 0
+    private var pendingCapture: MethodChannel.Result? = null
+    private var captureTimeout: Runnable? = null
     private var lensMode = NativeLensMode.BackAuto
     private var telephotoCamera: CameraLensCandidate? = null
     private var extensionsManager: ExtensionsManager? = null
@@ -88,6 +96,11 @@ class NativeCameraPreviewView(
     init {
         previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
         previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        previewView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
+            preview?.targetRotation = rotation
+            imageCapture?.targetRotation = rotation
+        }
         previewView.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_UP) {
                 focusAt(event.x, event.y)
@@ -102,9 +115,32 @@ class NativeCameraPreviewView(
     override fun dispose() {
         if (disposed) return
         disposed = true
+        initializationGeneration++
         channel.setMethodCallHandler(null)
-        cameraProvider?.unbindAll()
+        finishPendingCapture("camera_closed", "拍摄页面已关闭。")
+        releaseUseCases()
         executor.shutdown()
+    }
+
+    private fun releaseUseCases() {
+        // A Flutter layout change can dispose an old view after its replacement binds.
+        // Release only this view's use cases, never the provider's other cameras.
+        val owned = listOfNotNull(preview, imageCapture)
+        if (owned.isNotEmpty()) cameraProvider?.unbind(*owned.toTypedArray())
+        preview = null
+        imageCapture = null
+        camera = null
+        if (activeView === this) activeView = null
+    }
+
+    private fun finishPendingCapture(code: String, message: String) {
+        captureTimeout?.let(mainHandler::removeCallbacks)
+        captureTimeout = null
+        captureGeneration++
+        captureInProgress = false
+        val result = pendingCapture
+        pendingCapture = null
+        result?.error(code, message, null)
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -129,8 +165,12 @@ class NativeCameraPreviewView(
             "takePicture" -> try {
                 takePicture(call, result)
             } catch (error: Exception) {
-                captureInProgress = false
-                result.error("capture_failed", "照片拍摄失败，请检查剩余存储空间后重试。", null)
+                if (pendingCapture === result) {
+                    finishPendingCapture("capture_failed", "照片拍摄失败，请检查剩余存储空间后重试。")
+                } else {
+                    captureInProgress = false
+                    result.error("capture_failed", "照片拍摄失败，请检查剩余存储空间后重试。", null)
+                }
             }
             "writePhotoLocation" -> writePhotoLocation(call, result)
             "dispose" -> {
@@ -142,9 +182,13 @@ class NativeCameraPreviewView(
     }
 
     private fun initialize(call: MethodCall, result: MethodChannel.Result) {
+        val generation = ++initializationGeneration
         targetAspectRatio = sanitizedAspectRatio(
             call.argument<Double>("targetAspectRatio") ?: targetAspectRatio,
         )
+        cropCaptureToAspectRatio = call.argument<Boolean>("cropCaptureToAspectRatio") ?: cropCaptureToAspectRatio
+        requestedEnhancement = (call.argument<String>("enhancementMode") ?: requestedEnhancement)
+            .takeIf { it in setOf("auto", "hdr", "night", "off") } ?: "auto"
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             result.error("camera_permission_denied", "Camera permission is not granted.", null)
             return
@@ -153,10 +197,14 @@ class NativeCameraPreviewView(
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener(
             {
+                if (disposed || generation != initializationGeneration) {
+                    result.error("camera_closed", "相机连接已更新。", null)
+                    return@addListener
+                }
                 try {
                     cameraProvider = providerFuture.get()
                     telephotoCamera = findTelephotoCamera()
-                    initializeExtensions(result)
+                    initializeExtensions(result, generation)
                 } catch (error: Exception) {
                     result.error("camera_initialize_failed", "相机启动失败，请关闭其他占用相机的应用后重试。", null)
                 }
@@ -165,10 +213,10 @@ class NativeCameraPreviewView(
         )
     }
 
-    private fun initializeExtensions(result: MethodChannel.Result) {
+    private fun initializeExtensions(result: MethodChannel.Result, generation: Int) {
         val provider = cameraProvider ?: return
         fun finish() {
-            if (disposed) {
+            if (disposed || generation != initializationGeneration) {
                 result.error("camera_closed", "拍摄页面已关闭。", null)
                 return
             }
@@ -232,6 +280,10 @@ class NativeCameraPreviewView(
     }
 
     private fun bindUseCases(provider: ProcessCameraProvider, selector: CameraSelector, zoom: Float) {
+        if (disposed) throw IllegalStateException("Camera view is closed")
+        if (activeView !== this) activeView?.releaseUseCases()
+        releaseUseCases()
+        activeView = this
         val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
         reportedPhysicalCamera = "系统未提供"
         reportedFocalLength = "系统未提供"
@@ -250,11 +302,11 @@ class NativeCameraPreviewView(
                 },
             )
         }
-        val preview = previewBuilder.build()
+        val nextPreview = previewBuilder.build()
             .also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
-        imageCapture = ImageCapture.Builder()
+        val nextCapture = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .setJpegQuality(100)
             .setTargetRotation(rotation)
@@ -265,12 +317,13 @@ class NativeCameraPreviewView(
             .setFlashMode(flashMode)
             .build()
 
-        provider.unbindAll()
+        preview = nextPreview
+        imageCapture = nextCapture
         camera = provider.bindToLifecycle(
             activity as LifecycleOwner,
             selector,
-            preview,
-            imageCapture,
+            nextPreview,
+            nextCapture,
         )
         val zoomState = camera?.cameraInfo?.zoomState?.value
         camera?.cameraControl?.setZoomRatio(zoom.coerceIn(zoomState?.minZoomRatio ?: 1f, zoomState?.maxZoomRatio ?: 1f))
@@ -318,30 +371,33 @@ class NativeCameraPreviewView(
 
     private fun setTargetAspectRatio(call: MethodCall, result: MethodChannel.Result) {
         val previous = targetAspectRatio
+        val previousStreamRatio = cameraTargetAspectRatio()
         targetAspectRatio = sanitizedAspectRatio(
             call.argument<Double>("targetAspectRatio") ?: targetAspectRatio,
         )
         try {
-            if (cameraProvider != null && abs(previous - targetAspectRatio) > 0.001) {
+            if (cameraProvider != null && previousStreamRatio != cameraTargetAspectRatio()) {
                 bindCamera()
             }
             result.success(null)
         } catch (error: Exception) {
+            targetAspectRatio = previous
+            runCatching { bindCamera() }
             result.error("camera_ratio_failed", "照片比例设置失败，请重新打开拍摄页面。", null)
         }
     }
 
     private fun setCropCaptureToAspectRatio(call: MethodCall, result: MethodChannel.Result) {
         val enabled = call.argument<Boolean>("enabled") ?: cropCaptureToAspectRatio
-        try {
-            if (enabled != cropCaptureToAspectRatio) {
-                cropCaptureToAspectRatio = enabled
-                bindCamera()
+        val resetCrop = cropCaptureToAspectRatio && !enabled
+        cropCaptureToAspectRatio = enabled
+        if (resetCrop) {
+            try { bindCamera() } catch (_: Exception) {
+                result.error("camera_ratio_failed", "照片比例设置失败，请重连相机后重试。", null)
+                return
             }
-            result.success(null)
-        } catch (error: Exception) {
-            result.error("camera_ratio_failed", "照片比例设置失败，请重新打开拍摄页面。", null)
         }
+        result.success(null)
     }
 
     private fun setFlashMode(call: MethodCall, result: MethodChannel.Result) {
@@ -415,6 +471,15 @@ class NativeCameraPreviewView(
             capture.setCropAspectRatio(Rational((targetAspectRatio * 10000).toInt(), 10000))
         }
         captureInProgress = true
+        pendingCapture = result
+        val generation = ++captureGeneration
+        captureTimeout = Runnable {
+            if (generation == captureGeneration && pendingCapture != null) {
+                lastIssue = "拍摄超时"
+                finishPendingCapture("capture_timeout", "相机处理超时，已尝试恢复预览，请重试或在设置中改用标准画质。")
+                runCatching { bindCamera() }
+            }
+        }.also { mainHandler.postDelayed(it, 60000) }
         capture.takePicture(
             outputOptions,
             executor,
@@ -427,6 +492,10 @@ class NativeCameraPreviewView(
                         "${exif.getAttribute(ExifInterface.TAG_IMAGE_WIDTH)} × ${exif.getAttribute(ExifInterface.TAG_IMAGE_LENGTH)}"
                     }.getOrDefault("")
                     activity.runOnUiThread {
+                        if (disposed || generation != captureGeneration) return@runOnUiThread
+                        captureTimeout?.let(mainHandler::removeCallbacks)
+                        captureTimeout = null
+                        pendingCapture = null
                         captureInProgress = false
                         lastCaptureSize = size
                         result.success(file.absolutePath)
@@ -435,6 +504,10 @@ class NativeCameraPreviewView(
 
                 override fun onError(exception: ImageCaptureException) {
                     activity.runOnUiThread {
+                        if (disposed || generation != captureGeneration) return@runOnUiThread
+                        captureTimeout?.let(mainHandler::removeCallbacks)
+                        captureTimeout = null
+                        pendingCapture = null
                         captureInProgress = false
                         lastIssue = "拍摄失败：${exception.imageCaptureError}"
                         result.error("capture_failed", "照片未能保存，请检查剩余存储空间后重试；增强模式下可切换标准模式再拍。", null)
@@ -624,6 +697,7 @@ class NativeCameraPreviewView(
         val zoom = state?.zoomRatio ?: 1.0f
         val scale = zoomScale()
         return mapOf(
+            "ready" to (camera != null && imageCapture != null),
             "minZoomRatio" to minZoom * scale,
             "maxZoomRatio" to maxZoom * scale,
             "zoomRatio" to zoom * scale,
@@ -632,5 +706,10 @@ class NativeCameraPreviewView(
             "supportsTelephoto" to (telephotoCamera != null),
             "quality" to qualityStateMap(),
         )
+    }
+
+    companion object {
+        // Accessed only on the main thread; explicitly cleared on view disposal.
+        private var activeView: NativeCameraPreviewView? = null
     }
 }

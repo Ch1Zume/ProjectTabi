@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import '../camera_reference/camera_platform.dart';
 
 import '../app_theme.dart';
 import 'map_colors.dart';
@@ -383,6 +384,7 @@ class _PilgrimageMapScreenState extends State<PilgrimageMapScreen>
   }
 
   void _openCamera(PilgrimagePoint point) {
+    if (!supportsReferenceCamera) return;
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => CamerawesomeReferenceScreen(
@@ -1212,7 +1214,7 @@ class _PointCard extends StatelessWidget {
                   status != VisitStatus.current &&
                   status != VisitStatus.completed;
               final actions = <Widget>[
-                SizedBox(
+                if (supportsReferenceCamera) SizedBox(
                   width: _mapPointPrimaryActionWidth,
                   height: _mapPointActionExtent,
                   child: IconButton.outlined(
@@ -1239,7 +1241,7 @@ class _PointCard extends StatelessWidget {
                     ),
                   ),
                 ),
-                const SizedBox(width: 4),
+                if (supportsReferenceCamera) const SizedBox(width: 4),
                 SizedBox(
                   width: _mapPointPrimaryActionWidth,
                   height: _mapPointActionExtent,

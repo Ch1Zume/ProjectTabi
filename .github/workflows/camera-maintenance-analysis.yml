@@ -1,0 +1,24 @@
+name: Camera maintenance analysis
+
+on:
+  push:
+    branches: ['codex/camera-stability-012']
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.0'
+          channel: stable
+      - run: flutter pub get
+      - name: Analyze camera and desktop changes
+        run: >-
+          flutter analyze lib/camera_reference lib/settings/settings_screen.dart
+          lib/plan/plan_screen.dart lib/map/pilgrimage_map_screen.dart
+          lib/map/in_app_navigation_screen.dart lib/point_detail/point_detail_sheet.dart

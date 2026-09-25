@@ -35,8 +35,13 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: python3 tool/restore_android_signing.py --require
       - run: flutter pub get
-      - name: Analyze update integration
-        run: flutter analyze lib/update lib/app_version.dart lib/main.dart lib/settings/settings_screen.dart lib/sync/sync_guard_repository.dart
+      - name: Analyze release integration
+        run: >-
+          flutter analyze lib/update lib/app_version.dart lib/main.dart
+          lib/settings/settings_screen.dart lib/sync/sync_guard_repository.dart
+          lib/camera_reference lib/plan/plan_screen.dart
+          lib/map/pilgrimage_map_screen.dart lib/map/in_app_navigation_screen.dart
+          lib/point_detail/point_detail_sheet.dart
       - name: Build Android package
         run: flutter build apk --release --no-pub
       - name: Find previous release APK

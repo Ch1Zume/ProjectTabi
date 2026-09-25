@@ -42,6 +42,7 @@ class VisitRecordConfirmationScreen extends StatefulWidget {
     this.capturedAtOverride,
     this.settings = const AppSettings(),
     this.saveVisitPhotoToGallery = false,
+    this.importedFromGallery = false,
     this.autoSaveComparisonToGallery = false,
     this.photoLocationStrategy = PhotoLocationStrategy.disabled,
     this.writePhotoLocation,
@@ -59,6 +60,7 @@ class VisitRecordConfirmationScreen extends StatefulWidget {
   final DateTime? capturedAtOverride;
   final AppSettings settings;
   final bool saveVisitPhotoToGallery;
+  final bool importedFromGallery;
   final bool autoSaveComparisonToGallery;
   final PhotoLocationStrategy photoLocationStrategy;
   final PhotoLocationWriter? writePhotoLocation;
@@ -171,7 +173,7 @@ class _VisitRecordConfirmationScreenState
 
     var attemptedGalleryBackup = false;
     var galleryBackupSucceeded = false;
-    if (widget.saveVisitPhotoToGallery) {
+    if (record != null && widget.saveVisitPhotoToGallery && !widget.importedFromGallery) {
       if (mounted) {
         setState(() => _savingStage = '备份巡礼照片中...');
       }
@@ -333,8 +335,8 @@ class _VisitRecordConfirmationScreenState
   }
 }
 
-bool shouldAutoSaveVisitPhotoToGallery(AppSettings settings) {
-  if (!settings.saveVisitPhotoToGallery || kIsWeb) {
+bool shouldAutoSaveVisitPhotoToGallery(AppSettings settings, {bool importedFromGallery = false}) {
+  if (importedFromGallery || !settings.saveVisitPhotoToGallery || kIsWeb) {
     return false;
   }
   return defaultTargetPlatform == TargetPlatform.android ||
