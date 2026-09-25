@@ -7,6 +7,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'app_shell.dart';
+import 'update/update_controller.dart';
+import 'update/update_screen.dart';
+import 'update/update_activity.dart';
 import 'sync/sync_guard_repository.dart';
 import 'app_theme.dart';
 import 'data/local/sqlite_pilgrimage_repository.dart';
@@ -259,17 +262,50 @@ class ProjectTabiApp extends StatefulWidget {
 
 class _ProjectTabiAppState extends State<ProjectTabiApp> with WidgetsBindingObserver {
   AppSettings _themeSettings = const AppSettings();
+  final _navigatorKey = GlobalKey<NavigatorState>();
+  final _messengerKey = GlobalKey<ScaffoldMessengerState>();
+  String? _notifiedUpdate;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    AppUpdateController.instance.addListener(_updateChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(AppUpdateController.instance.onForeground(true));
+    });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    AppUpdateController.instance.removeListener(_updateChanged);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    unawaited(AppUpdateController.instance.onForeground(state == AppLifecycleState.resumed));
+  }
+
+  void _updateChanged() {
+    final update = AppUpdateController.instance;
+    final navigator = _navigatorKey.currentState;
+    if (!mounted || !update.hasUpdate || update.version == _notifiedUpdate ||
+        navigator == null || navigator.canPop() || UpdateActivity.busy) return;
+    _notifiedUpdate = update.version;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _messengerKey.currentState?.showSnackBar(SnackBar(
+        content: Text('ProjectTabi ${update.version} 已可更新'),
+        duration: const Duration(seconds: 8),
+        action: SnackBarAction(label: '查看', onPressed: () {
+          if (!navigator.canPop() && !UpdateActivity.busy) {
+            navigator.push(MaterialPageRoute<void>(builder: (_) => const AppUpdateScreen()));
+          }
+        }),
+      ));
+    });
   }
 
   @override
@@ -308,6 +344,8 @@ class _ProjectTabiAppState extends State<ProjectTabiApp> with WidgetsBindingObse
       title: 'ProjectTabi',
       debugShowCheckedModeBanner: false,
       theme: theme,
+      navigatorKey: _navigatorKey,
+      scaffoldMessengerKey: _messengerKey,
       themeAnimationDuration: Duration.zero,
       themeAnimationStyle: AnimationStyle.noAnimation,
       navigatorObservers: [copyOverlayNavigatorObserver],

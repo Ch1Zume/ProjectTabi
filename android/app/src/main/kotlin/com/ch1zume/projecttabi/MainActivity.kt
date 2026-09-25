@@ -20,6 +20,7 @@ class MainActivity : FlutterActivity() {
     private var planFileChannel: MethodChannel? = null
     private var pendingPlanPath: String? = null
     private var mapHeading: MapHeadingStream? = null
+    private var appUpdater: AppUpdater? = null
 
     override fun onResume() {
         super.onResume()
@@ -32,6 +33,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        appUpdater?.close()
+        appUpdater = null
         mapHeading?.onCancel(null)
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, "miriago/map_heading")
             .setStreamHandler(null)
@@ -41,6 +44,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        appUpdater = AppUpdater(this, flutterEngine.dartExecutor.binaryMessenger)
         mapHeading = MapHeadingStream(this)
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, "miriago/map_heading")
             .setStreamHandler(mapHeading)

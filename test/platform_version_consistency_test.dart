@@ -44,16 +44,16 @@ void main() {
     final tauriConfig = jsonDecode(
       File('src-tauri/tauri.conf.json').readAsStringSync(),
     );
-    expect(tauriConfig['version'], versionName);
+    expect(tauriConfig['version'], projectTabiAppVersion);
 
     final cargoToml = File('src-tauri/Cargo.toml').readAsStringSync();
-    expect(cargoToml, contains('version = "$versionName"'));
+    expect(cargoToml, contains('version = "$projectTabiAppVersion"'));
     final cargoLock = normalizeLineEndings(
       File('src-tauri/Cargo.lock').readAsStringSync(),
     );
     expect(
       cargoLock,
-      contains('name = "projecttabi-desktop"\nversion = "$versionName"'),
+      contains('name = "projecttabi-desktop"\nversion = "$projectTabiAppVersion"'),
     );
   });
 }

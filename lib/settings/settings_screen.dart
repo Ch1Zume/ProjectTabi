@@ -11,6 +11,8 @@ import '../sync/webdav_settings_screen.dart';
 import '../sync/sync_platform.dart';
 import '../sync/sync_repository.dart';
 import '../app_version.dart';
+import '../update/update_controller.dart';
+import '../update/update_screen.dart';
 import '../camera_reference/camera_zoom_capabilities.dart';
 import '../data/pilgrimage_repository.dart';
 import '../data/reference_cache_cleanup.dart';
@@ -31,13 +33,6 @@ import '../widgets/copyable_text.dart';
 import '../widgets/input_dialog.dart';
 import '../widgets/responsive_button.dart';
 import '../widgets/snackbar_helper.dart';
-
-Future<void> _openProjectTabiReleases() async {
-  await launchUrl(
-    Uri.parse('https://github.com/Ch1Zume/ProjectTabi/releases'),
-    mode: LaunchMode.externalApplication,
-  );
-}
 
 bool get _showCacheCleanupSettings => isReferenceCacheCleanupSupported;
 bool get _showDebugPhotoLocationSettings => false;
@@ -2705,12 +2700,19 @@ class _AboutSettingsPage extends StatelessWidget {
               label: '开源仓库',
               value: 'github.com/Ch1Zume/ProjectTabi',
             ),
-            const ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.download_outlined),
-              title: Text('下载更新包'),
-              subtitle: Text('打开 GitHub Releases 获取 Windows 安装包或 Android APK'),
-              onTap: _openProjectTabiReleases,
+            AnimatedBuilder(
+              animation: AppUpdateController.instance,
+              builder: (context, _) => ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.system_update_outlined),
+                title: const Text('应用更新'),
+                subtitle: Text(AppUpdateController.instance.hasUpdate
+                    ? '新版本 ${AppUpdateController.instance.version} 可用'
+                    : '检查更新、自动下载与更新记录'),
+                onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                  builder: (_) => const AppUpdateScreen(),
+                )),
+              ),
             ),
             const _AboutInfoTile(
               icon: LucideIcons.scale,
