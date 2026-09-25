@@ -12,7 +12,8 @@
     <application
         android:label="ProjectTabi"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round">
         <provider
             android:name=".UpdateFileProvider"
             android:authorities="${applicationId}.updates"

@@ -3,7 +3,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import 'desktop/tauri_bridge.dart';
 
-const projectTabiAppVersion = '0.1.2+4';
+const projectTabiAppVersion = '0.1.3+5';
 
 Future<String> loadAppVersionLabel({
   bool? desktopLauncherAvailable,
