@@ -65,12 +65,14 @@ flutter {
 }
 
 dependencies {
-    val cameraxVersion = "1.5.1"
+    val cameraxVersion = "1.6.2"
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
     implementation("androidx.camera:camera-view:$cameraxVersion")
+    implementation("androidx.camera:camera-extensions:$cameraxVersion")
     implementation("androidx.exifinterface:exifinterface:1.4.1")
+    testImplementation("junit:junit:4.13.2")
 }
 
 // An unsigned compile check is explicit; release builds never use a disposable key.

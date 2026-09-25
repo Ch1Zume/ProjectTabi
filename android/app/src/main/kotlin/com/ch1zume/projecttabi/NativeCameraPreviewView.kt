@@ -3,13 +3,13 @@ package com.ch1zume.projecttabi
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Matrix
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.location.Location
+import android.os.Build
+import android.util.Rational
 import android.view.MotionEvent
+import android.view.Surface
 import android.view.View
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
@@ -19,6 +19,11 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.extensions.ExtensionMode
+import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -58,7 +63,17 @@ class NativeCameraPreviewView(
     private var camera: Camera? = null
     private var imageCapture: ImageCapture? = null
     private var lensMode = NativeLensMode.BackAuto
-    private val telephotoCameraId: String? by lazy { findTelephotoCameraId() }
+    private var telephotoCamera: CameraLensCandidate? = null
+    private var extensionsManager: ExtensionsManager? = null
+    private var requestedEnhancement = "auto"
+    private var activeEnhancement = "off"
+    private var supportedEnhancements = emptySet<String>()
+    private val failedExtensions = mutableSetOf<String>()
+    private var qualityNotice = ""
+    private var lastIssue = ""
+    private var lastCaptureSize = ""
+    private var disposed = false
+    private var captureInProgress = false
     private var flashMode = ImageCapture.FLASH_MODE_AUTO
     private var targetAspectRatio = 1.0
     private var cropCaptureToAspectRatio = true
@@ -78,12 +93,22 @@ class NativeCameraPreviewView(
     override fun getView(): View = previewView
 
     override fun dispose() {
+        if (disposed) return
+        disposed = true
         channel.setMethodCallHandler(null)
         cameraProvider?.unbindAll()
         executor.shutdown()
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        if (disposed) {
+            result.error("camera_closed", "拍摄页面已关闭，请重新打开。", null)
+            return
+        }
+        if (captureInProgress && call.method !in setOf("getZoomState", "dispose")) {
+            result.error("camera_busy", "照片正在处理中，请稍后再操作。", null)
+            return
+        }
         when (call.method) {
             "initialize" -> initialize(call, result)
             "getZoomState" -> result.success(zoomStateMap())
@@ -93,7 +118,13 @@ class NativeCameraPreviewView(
             "setFlashMode" -> setFlashMode(call, result)
             "switchCamera" -> switchCamera(result)
             "switchLens" -> switchLens(result)
-            "takePicture" -> takePicture(call, result)
+            "setEnhancementMode" -> setEnhancementMode(call, result)
+            "takePicture" -> try {
+                takePicture(call, result)
+            } catch (error: Exception) {
+                captureInProgress = false
+                result.error("capture_failed", "照片拍摄失败，请检查剩余存储空间后重试。", null)
+            }
             "writePhotoLocation" -> writePhotoLocation(call, result)
             "dispose" -> {
                 dispose()
@@ -117,29 +148,99 @@ class NativeCameraPreviewView(
             {
                 try {
                     cameraProvider = providerFuture.get()
-                    bindCamera()
-                    camera?.cameraControl?.setZoomRatio(1.0f)
-                    result.success(zoomStateMap())
+                    telephotoCamera = findTelephotoCamera()
+                    initializeExtensions(result)
                 } catch (error: Exception) {
-                    result.error("camera_initialize_failed", error.message, null)
+                    result.error("camera_initialize_failed", "相机启动失败，请关闭其他占用相机的应用后重试。", null)
                 }
             },
             ContextCompat.getMainExecutor(context),
         )
     }
 
-    private fun bindCamera() {
+    private fun initializeExtensions(result: MethodChannel.Result) {
+        val provider = cameraProvider ?: return
+        fun finish() {
+            if (disposed) {
+                result.error("camera_closed", "拍摄页面已关闭。", null)
+                return
+            }
+            try {
+                bindCamera()
+                result.success(zoomStateMap())
+            } catch (error: Exception) {
+                result.error("camera_initialize_failed", "相机启动失败，请关闭其他占用相机的应用后重试。", null)
+            }
+        }
+        try {
+            val future = ExtensionsManager.getInstanceAsync(context, provider)
+            future.addListener({
+                try {
+                    extensionsManager = future.get()
+                } catch (error: Exception) {
+                    lastIssue = "增强接口初始化失败：${error.javaClass.simpleName}"
+                }
+                finish()
+            }, ContextCompat.getMainExecutor(context))
+        } catch (error: Exception) {
+            lastIssue = "增强接口不可用：${error.javaClass.simpleName}"
+            finish()
+        }
+    }
+
+    private fun bindCamera(zoom: Float = camera?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1.0f) {
         val provider = cameraProvider ?: return
         val selector = cameraSelectorForLensMode(lensMode)
+        val manager = extensionsManager
+        // OEM extensions own their stream configuration. Do not let them silently replace
+        // an explicitly selected physical telephoto with its parent logical camera.
+        val pinnedPhysical = lensMode == NativeLensMode.BackTelephoto && telephotoCamera?.physicalCameraId != null
+        supportedEnhancements = if (manager == null || pinnedPhysical) emptySet() else {
+            enhancementModes.filter { (name, mode) ->
+                extensionKey(name) !in failedExtensions &&
+                    runCatching { manager.isExtensionAvailable(selector, mode) }.getOrDefault(false)
+            }.keys
+        }
+        activeEnhancement = CameraQualityPolicy.enhancement(requestedEnhancement, supportedEnhancements)
+        qualityNotice = when {
+            requestedEnhancement == "off" -> "已关闭画质增强，使用标准拍摄。"
+            pinnedPhysical -> "已指定长焦镜头；此模式使用标准拍摄。"
+            activeEnhancement == "off" -> "当前镜头未提供可用增强，使用画质优先拍摄。"
+            else -> ""
+        }
+        try {
+            val enhancedSelector = if (activeEnhancement != "off" && manager != null) {
+                manager.getExtensionEnabledCameraSelector(selector, enhancementModes.getValue(activeEnhancement))
+            } else selector
+            bindUseCases(provider, enhancedSelector, zoom)
+        } catch (error: Exception) {
+            if (activeEnhancement == "off") throw error
+            failedExtensions.add(extensionKey(activeEnhancement))
+            supportedEnhancements = supportedEnhancements - activeEnhancement
+            activeEnhancement = "off"
+            qualityNotice = "画质增强启动失败，已恢复标准拍摄；可重新打开拍摄页重试。"
+            lastIssue = "增强启动失败：${error.javaClass.simpleName}"
+            bindUseCases(provider, selector, zoom)
+        }
+    }
+
+    private fun bindUseCases(provider: ProcessCameraProvider, selector: CameraSelector, zoom: Float) {
+        val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
         val preview = Preview.Builder()
             .setTargetAspectRatio(cameraTargetAspectRatio())
+            .setTargetRotation(rotation)
             .build()
             .also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
         imageCapture = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-            .setTargetAspectRatio(cameraTargetAspectRatio())
+            .setJpegQuality(100)
+            .setTargetRotation(rotation)
+            .setResolutionSelector(ResolutionSelector.Builder()
+                .setAspectRatioStrategy(AspectRatioStrategy(cameraTargetAspectRatio(), AspectRatioStrategy.FALLBACK_RULE_AUTO))
+                .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                .build())
             .setFlashMode(flashMode)
             .build()
 
@@ -150,35 +251,73 @@ class NativeCameraPreviewView(
             preview,
             imageCapture,
         )
+        val zoomState = camera?.cameraInfo?.zoomState?.value
+        camera?.cameraControl?.setZoomRatio(zoom.coerceIn(zoomState?.minZoomRatio ?: 1f, zoomState?.maxZoomRatio ?: 1f))
     }
 
+    private fun extensionKey(mode: String) = "${lensMode.value}:$mode"
+
+    private fun setEnhancementMode(call: MethodCall, result: MethodChannel.Result) {
+        val mode = call.argument<String>("mode") ?: "auto"
+        if (mode !in setOf("auto", "hdr", "night", "off")) {
+            result.error("invalid_enhancement", "请选择有效的画质模式。", null)
+            return
+        }
+        requestedEnhancement = mode
+        try {
+            bindCamera()
+            result.success(zoomStateMap())
+        } catch (error: Exception) {
+            result.error("camera_enhancement_failed", "画质模式切换失败，请重新打开拍摄页面。", null)
+        }
+    }
+
+    private val enhancementModes = mapOf("auto" to ExtensionMode.AUTO, "hdr" to ExtensionMode.HDR, "night" to ExtensionMode.NIGHT)
+
     private fun setZoomRatio(call: MethodCall, result: MethodChannel.Result) {
-        val requested = (call.argument<Double>("zoomRatio") ?: 1.0).toFloat()
+        val requested = ((call.argument<Double>("zoomRatio") ?: 1.0) / zoomScale()).toFloat()
         val state = camera?.cameraInfo?.zoomState?.value
-        val minZoom = state?.minZoomRatio ?: 1.0f
+        val minZoom = if (lensMode == NativeLensMode.BackTelephoto) max(1f, state?.minZoomRatio ?: 1f) else state?.minZoomRatio ?: 1f
         val maxZoom = state?.maxZoomRatio ?: 1.0f
         val nextZoom = min(max(requested, minZoom), maxZoom)
-        camera?.cameraControl?.setZoomRatio(nextZoom)
-        result.success(zoomStateMap(nextZoom))
+        val future = camera?.cameraControl?.setZoomRatio(nextZoom)
+        if (future == null) {
+            result.error("camera_not_ready", "相机尚未就绪，请稍后再试。", null)
+            return
+        }
+        future.addListener({
+            // A newer slider event can cancel an older zoom request.
+            runCatching { future.get() }
+            result.success(zoomStateMap())
+        }, ContextCompat.getMainExecutor(context))
     }
 
     private fun setTargetAspectRatio(call: MethodCall, result: MethodChannel.Result) {
+        val previous = targetAspectRatio
         targetAspectRatio = sanitizedAspectRatio(
             call.argument<Double>("targetAspectRatio") ?: targetAspectRatio,
         )
         try {
-            if (cameraProvider != null) {
+            if (cameraProvider != null && abs(previous - targetAspectRatio) > 0.001) {
                 bindCamera()
             }
             result.success(null)
         } catch (error: Exception) {
-            result.error("camera_ratio_failed", error.message, null)
+            result.error("camera_ratio_failed", "照片比例设置失败，请重新打开拍摄页面。", null)
         }
     }
 
     private fun setCropCaptureToAspectRatio(call: MethodCall, result: MethodChannel.Result) {
-        cropCaptureToAspectRatio = call.argument<Boolean>("enabled") ?: cropCaptureToAspectRatio
-        result.success(null)
+        val enabled = call.argument<Boolean>("enabled") ?: cropCaptureToAspectRatio
+        try {
+            if (enabled != cropCaptureToAspectRatio) {
+                cropCaptureToAspectRatio = enabled
+                bindCamera()
+            }
+            result.success(null)
+        } catch (error: Exception) {
+            result.error("camera_ratio_failed", "照片比例设置失败，请重新打开拍摄页面。", null)
+        }
     }
 
     private fun setFlashMode(call: MethodCall, result: MethodChannel.Result) {
@@ -212,23 +351,25 @@ class NativeCameraPreviewView(
         val previousMode = lensMode
         lensMode = nextLensMode()
         try {
-            bindCamera()
+            bindCamera(1.0f)
             result.success(zoomStateMap())
         } catch (error: Exception) {
+            if (lensMode == NativeLensMode.BackTelephoto) telephotoCamera = null
             lensMode = NativeLensMode.BackAuto
             try {
                 bindCamera()
             } catch (_: Exception) {
                 lensMode = previousMode
             }
-            result.error("camera_switch_failed", error.message, null)
+            lastIssue = "镜头切换失败：${error.javaClass.simpleName}"
+            result.error("camera_switch_failed", "这颗镜头暂时无法使用，已尝试恢复后置相机。", null)
         }
     }
 
     private fun takePicture(call: MethodCall, result: MethodChannel.Result) {
         val capture = imageCapture
         if (capture == null) {
-            result.error("camera_not_ready", "Camera is not ready.", null)
+            result.error("camera_not_ready", "相机尚未就绪，请稍后再试。", null)
             return
         }
 
@@ -245,24 +386,34 @@ class NativeCameraPreviewView(
         val outputOptions = ImageCapture.OutputFileOptions.Builder(file)
             .setMetadata(metadata)
             .build()
+        capture.targetRotation = previewView.display?.rotation ?: Surface.ROTATION_0
+        if (cropCaptureToAspectRatio) {
+            capture.setCropAspectRatio(Rational((targetAspectRatio * 10000).toInt(), 10000))
+        }
+        captureInProgress = true
         capture.takePicture(
             outputOptions,
             executor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                    try {
-                        normalizeAndCropImage(file, location)
-                        activity.runOnUiThread { result.success(file.absolutePath) }
-                    } catch (error: Exception) {
-                        activity.runOnUiThread {
-                            result.error("capture_crop_failed", error.message, null)
-                        }
+                    // CameraX applies the requested crop and EXIF orientation. Preserve its
+                    // output bytes: decoding and re-encoding here used to lose JPEG detail.
+                    val size = runCatching {
+                        val exif = ExifInterface(file.absolutePath)
+                        "${exif.getAttribute(ExifInterface.TAG_IMAGE_WIDTH)} × ${exif.getAttribute(ExifInterface.TAG_IMAGE_LENGTH)}"
+                    }.getOrDefault("")
+                    activity.runOnUiThread {
+                        captureInProgress = false
+                        lastCaptureSize = size
+                        result.success(file.absolutePath)
                     }
                 }
 
                 override fun onError(exception: ImageCaptureException) {
                     activity.runOnUiThread {
-                        result.error("capture_failed", exception.message, null)
+                        captureInProgress = false
+                        lastIssue = "拍摄失败：${exception.imageCaptureError}"
+                        result.error("capture_failed", "照片未能保存，请检查剩余存储空间后重试；增强模式下可切换标准模式再拍。", null)
                     }
                 }
             },
@@ -340,216 +491,118 @@ class NativeCameraPreviewView(
     }
 
     private fun cameraSelectorForLensMode(mode: NativeLensMode): CameraSelector {
-        val builder = CameraSelector.Builder()
-        when (mode) {
-            NativeLensMode.BackTelephoto -> {
-                val cameraId = telephotoCameraId
-                if (cameraId != null) {
-                    builder.addCameraFilter { cameraInfos ->
-                        cameraInfos.filter { Camera2CameraInfo.from(it).cameraId == cameraId }
-                    }
-                    return builder.build()
-                }
-                lensMode = NativeLensMode.BackAuto
-                builder.requireLensFacing(CameraSelector.LENS_FACING_BACK)
-            }
-            NativeLensMode.Front -> builder.requireLensFacing(CameraSelector.LENS_FACING_FRONT)
-            NativeLensMode.BackAuto -> builder.requireLensFacing(CameraSelector.LENS_FACING_BACK)
+        if (mode == NativeLensMode.Front) return CameraSelector.DEFAULT_FRONT_CAMERA
+        val tele = telephotoCamera
+        if (mode != NativeLensMode.BackTelephoto || tele == null) {
+            return CameraSelector.DEFAULT_BACK_CAMERA
         }
-        return builder.build()
+        return CameraSelector.Builder()
+            .addCameraFilter { infos ->
+                infos.filter { Camera2CameraInfo.from(it).cameraId == tele.cameraId }
+            }
+            .apply { tele.physicalCameraId?.let { setPhysicalCameraId(it) } }
+            .build()
     }
 
-    private fun nextLensMode(): NativeLensMode {
-        return when (lensMode) {
-            NativeLensMode.BackAuto -> {
-                if (telephotoCameraId != null) NativeLensMode.BackTelephoto else NativeLensMode.Front
-            }
-            NativeLensMode.BackTelephoto -> NativeLensMode.Front
-            NativeLensMode.Front -> NativeLensMode.BackAuto
-        }
+    private fun nextLensMode(): NativeLensMode = when (lensMode) {
+        NativeLensMode.BackAuto ->
+            if (telephotoCamera != null) NativeLensMode.BackTelephoto else NativeLensMode.Front
+        NativeLensMode.BackTelephoto -> NativeLensMode.Front
+        NativeLensMode.Front -> NativeLensMode.BackAuto
     }
 
-    private fun findTelephotoCameraId(): String? {
+    private fun findTelephotoCamera(): CameraLensCandidate? {
+        val provider = cameraProvider ?: return null
+        val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         return try {
-            val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            val backCameras = manager.cameraIdList.mapNotNull { cameraId ->
-                val characteristics = manager.getCameraCharacteristics(cameraId)
-                if (
-                    characteristics.get(CameraCharacteristics.LENS_FACING) !=
-                    CameraCharacteristics.LENS_FACING_BACK
-                ) {
-                    return@mapNotNull null
+            val infos = CameraSelector.DEFAULT_BACK_CAMERA.filter(provider.availableCameraInfos)
+            val default = infos.firstOrNull() ?: return null
+            val defaultId = Camera2CameraInfo.from(default).cameraId
+            val mainFocal = normalizedFocalLength(manager, defaultId) ?: return null
+            val candidates = mutableListOf<CameraLensCandidate>()
+            for (info in infos) {
+                val id = Camera2CameraInfo.from(info).cameraId
+                val relative = normalizedFocalLength(manager, id)?.div(mainFocal)
+                if (id != defaultId && relative != null) {
+                    candidates.add(CameraLensCandidate(id, relativeFocalLength = relative))
                 }
-
-                val focalLength = characteristics
-                    .get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                    ?.maxOrNull() ?: return@mapNotNull null
-                val physicalIds = physicalCameraIds(characteristics)
-                CameraInfo(cameraId, focalLength, physicalIds)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val physicalIds = runCatching {
+                        manager.getCameraCharacteristics(id).physicalCameraIds
+                    }.getOrDefault(emptySet())
+                    for (physicalId in physicalIds) {
+                        val physicalFocal = normalizedFocalLength(manager, physicalId) ?: continue
+                        candidates.add(CameraLensCandidate(id, physicalId, physicalFocal / mainFocal))
+                    }
+                }
             }
-            val logicalCameraIds = backCameras
-                .filter { it.physicalIds.isNotEmpty() }
-                .map { it.cameraId }
-                .toSet()
-            val mainFocalLength = backCameras
-                .filter { it.physicalIds.isNotEmpty() }
-                .maxOfOrNull { it.focalLength }
-                ?: backCameras.maxOfOrNull { it.focalLength }
-                ?: return null
-            backCameras
-                .filter { it.cameraId !in logicalCameraIds }
-                .filter { it.physicalIds.isEmpty() }
-                .filter { it.focalLength > mainFocalLength * 1.25f }
-                .maxByOrNull { it.focalLength }
-                ?.cameraId
-        } catch (_: Exception) {
+            CameraQualityPolicy.telephoto(candidates)
+        } catch (error: Exception) {
+            lastIssue = "镜头检测失败：${error.javaClass.simpleName}"
             null
         }
     }
 
-    private fun physicalCameraIds(characteristics: CameraCharacteristics): Set<String> {
-        return try {
-            characteristics.physicalCameraIds
-        } catch (_: Exception) {
-            emptySet()
-        }
-    }
+    private fun normalizedFocalLength(manager: CameraManager, id: String): Double? = runCatching {
+        val characteristics = manager.getCameraCharacteristics(id)
+        val focal = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+            ?.minOrNull()?.toDouble() ?: return@runCatching null
+        val size = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return@runCatching null
+        CameraQualityPolicy.normalizedFocalLength(focal, size.width.toDouble(), size.height.toDouble())
+    }.getOrNull()
 
-    private fun normalizeAndCropImage(file: File, location: Location?) {
-        val sourceExif = ExifInterface(file.absolutePath)
-        val preservedAttributes = preservedExifTags.mapNotNull { tag ->
-            sourceExif.getAttribute(tag)?.let { tag to it }
-        }
-        val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return
-        val oriented = applyExifOrientation(bitmap, file)
-        val output = if (cropCaptureToAspectRatio) {
-            cropBitmapToTargetAspectRatio(oriented)
-        } else {
-            oriented
-        }
+    private fun zoomScale(): Double =
+        if (lensMode == NativeLensMode.BackTelephoto) telephotoCamera?.relativeFocalLength ?: 1.0 else 1.0
 
-        file.outputStream().use { stream ->
-            output.compress(Bitmap.CompressFormat.JPEG, 95, stream)
+    private fun qualityStateMap(): Map<String, Any> {
+        val cameraId = camera?.cameraInfo?.let { Camera2CameraInfo.from(it).cameraId } ?: ""
+        val lens = when (lensMode) {
+            NativeLensMode.BackTelephoto -> "长焦"
+            NativeLensMode.Front -> "前置"
+            NativeLensMode.BackAuto -> "后置自动"
         }
-        ExifInterface(file.absolutePath).apply {
-            for ((tag, value) in preservedAttributes) {
-                setAttribute(tag, value)
-            }
-            setAttribute(
-                ExifInterface.TAG_ORIENTATION,
-                ExifInterface.ORIENTATION_NORMAL.toString(),
-            )
-            setAttribute(ExifInterface.TAG_IMAGE_WIDTH, output.width.toString())
-            setAttribute(ExifInterface.TAG_IMAGE_LENGTH, output.height.toString())
-            setAttribute(ExifInterface.TAG_PIXEL_X_DIMENSION, output.width.toString())
-            setAttribute(ExifInterface.TAG_PIXEL_Y_DIMENSION, output.height.toString())
-            setAttribute(ExifInterface.TAG_SOFTWARE, "ProjectTabi")
-            if (location != null) {
-                setGpsInfo(location)
-            }
-            saveAttributes()
-        }
-        if (output != oriented) {
-            output.recycle()
-        }
-        if (oriented != bitmap) {
-            oriented.recycle()
-        }
-        bitmap.recycle()
-    }
-
-    private val preservedExifTags = listOf(
-        ExifInterface.TAG_DATETIME,
-        ExifInterface.TAG_DATETIME_ORIGINAL,
-        ExifInterface.TAG_DATETIME_DIGITIZED,
-        ExifInterface.TAG_SUBSEC_TIME,
-        ExifInterface.TAG_SUBSEC_TIME_ORIGINAL,
-        ExifInterface.TAG_SUBSEC_TIME_DIGITIZED,
-        ExifInterface.TAG_OFFSET_TIME,
-        ExifInterface.TAG_OFFSET_TIME_ORIGINAL,
-        ExifInterface.TAG_OFFSET_TIME_DIGITIZED,
-        ExifInterface.TAG_MAKE,
-        ExifInterface.TAG_MODEL,
-        ExifInterface.TAG_LENS_MODEL,
-        ExifInterface.TAG_FOCAL_LENGTH,
-        ExifInterface.TAG_F_NUMBER,
-        ExifInterface.TAG_APERTURE_VALUE,
-        ExifInterface.TAG_EXPOSURE_TIME,
-        ExifInterface.TAG_SHUTTER_SPEED_VALUE,
-        ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY,
-        ExifInterface.TAG_FLASH,
-        ExifInterface.TAG_WHITE_BALANCE,
-        ExifInterface.TAG_EXPOSURE_BIAS_VALUE,
-        ExifInterface.TAG_EXPOSURE_MODE,
-        ExifInterface.TAG_METERING_MODE,
-        ExifInterface.TAG_COLOR_SPACE,
-    )
-
-    private fun applyExifOrientation(bitmap: Bitmap, file: File): Bitmap {
-        val orientation = ExifInterface(file.absolutePath).getAttributeInt(
-            ExifInterface.TAG_ORIENTATION,
-            ExifInterface.ORIENTATION_NORMAL,
-        )
-        val matrix = Matrix()
-        when (orientation) {
-            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
-            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
-            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
-            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
-            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
-            ExifInterface.ORIENTATION_TRANSPOSE -> {
-                matrix.preScale(-1f, 1f)
-                matrix.postRotate(90f)
-            }
-            ExifInterface.ORIENTATION_TRANSVERSE -> {
-                matrix.preScale(-1f, 1f)
-                matrix.postRotate(270f)
-            }
-            else -> return bitmap
-        }
-
-        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-    }
-
-    private fun cropBitmapToTargetAspectRatio(bitmap: Bitmap): Bitmap {
-        val currentRatio = bitmap.width.toDouble() / bitmap.height.toDouble()
-        if (abs(currentRatio - targetAspectRatio) < 0.01) {
-            return bitmap
-        }
-
-        val cropWidth: Int
-        val cropHeight: Int
-        if (currentRatio > targetAspectRatio) {
-            cropHeight = bitmap.height
-            cropWidth = (cropHeight * targetAspectRatio).toInt().coerceIn(1, bitmap.width)
-        } else {
-            cropWidth = bitmap.width
-            cropHeight = (cropWidth / targetAspectRatio).toInt().coerceIn(1, bitmap.height)
-        }
-
-        val left = ((bitmap.width - cropWidth) / 2).coerceAtLeast(0)
-        val top = ((bitmap.height - cropHeight) / 2).coerceAtLeast(0)
-        return Bitmap.createBitmap(bitmap, left, top, cropWidth, cropHeight)
-    }
-
-    private fun zoomStateMap(overrideZoom: Float? = null): Map<String, Any> {
-        val state = camera?.cameraInfo?.zoomState?.value
-        val minZoom = state?.minZoomRatio ?: 1.0f
-        val maxZoom = state?.maxZoomRatio ?: 1.0f
-        val zoom = overrideZoom ?: state?.zoomRatio ?: 1.0f
+        val resolution = imageCapture?.resolutionInfo?.resolution
+        val outputSize = resolution?.let { "${it.width} × ${it.height}" } ?: "等待相机就绪"
         return mapOf(
-            "minZoomRatio" to minZoom.toDouble(),
-            "maxZoomRatio" to maxZoom.toDouble(),
-            "zoomRatio" to zoom.toDouble(),
+            "requestedMode" to requestedEnhancement,
+            "activeMode" to activeEnhancement,
+            "availableModes" to supportedEnhancements.toList(),
+            "lensLabel" to lens,
+            "notice" to qualityNotice,
+            "outputSize" to outputSize,
+            "diagnostics" to listOf(
+                "ProjectTabi / CameraX 1.6.2",
+                "设备: ${Build.MANUFACTURER} ${Build.MODEL}",
+                "Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+                "系统版本: ${Build.DISPLAY}",
+                "镜头: $lens / cameraId=$cameraId",
+                "独立长焦: ${telephotoCamera ?: "未检测到可访问镜头"}",
+                "当前物理镜头: ${if (lensMode == NativeLensMode.BackTelephoto) telephotoCamera?.physicalCameraId ?: "独立相机" else "由系统选择"}",
+                "增强请求: $requestedEnhancement / 实际: $activeEnhancement",
+                "可用增强: ${supportedEnhancements.joinToString().ifEmpty { "无" }}",
+                "变焦: ${camera?.cameraInfo?.zoomState?.value?.zoomRatio} / 光学倍率估计: ${zoomScale()}",
+                "拍摄流尺寸: $outputSize / 最近照片: $lastCaptureSize",
+                "参考图裁剪: $cropCaptureToAspectRatio / 比例: $targetAspectRatio",
+                "状态: $qualityNotice",
+                "最近问题: $lastIssue",
+            ).joinToString("\n"),
+        )
+    }
+
+    private fun zoomStateMap(): Map<String, Any> {
+        val state = camera?.cameraInfo?.zoomState?.value
+        val minZoom = if (lensMode == NativeLensMode.BackTelephoto) max(1f, state?.minZoomRatio ?: 1f) else state?.minZoomRatio ?: 1f
+        val maxZoom = state?.maxZoomRatio ?: 1.0f
+        val zoom = state?.zoomRatio ?: 1.0f
+        val scale = zoomScale()
+        return mapOf(
+            "minZoomRatio" to minZoom * scale,
+            "maxZoomRatio" to maxZoom * scale,
+            "zoomRatio" to zoom * scale,
             "lensFacing" to if (lensMode == NativeLensMode.Front) "front" else "back",
             "lensMode" to lensMode.value,
-            "supportsTelephoto" to (telephotoCameraId != null),
+            "supportsTelephoto" to (telephotoCamera != null),
+            "quality" to qualityStateMap(),
         )
     }
-
-    private data class CameraInfo(
-        val cameraId: String,
-        val focalLength: Float,
-        val physicalIds: Set<String>,
-    )
 }
