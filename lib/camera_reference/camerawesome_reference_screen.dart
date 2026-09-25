@@ -30,6 +30,7 @@ import 'camera_storage_stub.dart'
     as camera_storage;
 import 'auto_comparison_gallery_backup.dart';
 import 'camera_zoom_capabilities.dart';
+import 'camera_quality_sheet.dart';
 import 'gallery_capture_time_stub.dart'
     if (dart.library.io) 'gallery_capture_time_io.dart';
 import 'photo_location.dart';
@@ -691,6 +692,10 @@ class _NativeCameraController extends ChangeNotifier {
   int? _viewId;
   var _ready = false;
   var _busy = false;
+  var _disposed = false;
+  var _zoomRequest = 0;
+  CameraQualityState? _quality;
+  String? operationMessage;
   String? _error;
   var _minZoomRatio = 1.0;
   var _maxZoomRatio = 1.0;
@@ -720,6 +725,7 @@ class _NativeCameraController extends ChangeNotifier {
   String get lensMode => _lensMode;
   bool get supportsTelephoto => _supportsTelephoto;
   bool get configuringCapture => _configuringCapture;
+  CameraQualityState? get quality => _quality;
 
   Future<void> attach(int viewId) async {
     if (_channel != null && _viewId == viewId) {
@@ -742,6 +748,9 @@ class _NativeCameraController extends ChangeNotifier {
     }
 
     _viewId = viewId;
+    _appliedCaptureAspectRatio = null;
+    _appliedCropCaptureToAspectRatio = null;
+    _appliedInitialZoomRatio = null;
     _channel = MethodChannel('seichi/native_camera_preview_$viewId');
     try {
       final result = await _channel!.invokeMapMethod<String, Object?>(
@@ -762,18 +771,43 @@ class _NativeCameraController extends ChangeNotifier {
 
   Future<void> setZoomRatio(double ratio) async {
     final channel = _channel;
-    if (channel == null || !_ready) {
+    if (channel == null || !_ready || _busy || _configuringCapture) {
       return;
     }
 
+    final request = ++_zoomRequest;
     _zoomRatio = ratio.clamp(_minZoomRatio, _maxZoomRatio);
     notifyListeners();
-    final result = await channel.invokeMapMethod<String, Object?>(
-      'setZoomRatio',
-      {'zoomRatio': _zoomRatio},
-    );
-    _applyZoomState(result);
+    try {
+      final result = await channel.invokeMapMethod<String, Object?>(
+        'setZoomRatio',
+        {'zoomRatio': _zoomRatio},
+      );
+      if (request == _zoomRequest) _applyZoomState(result);
+    } on PlatformException catch (error) {
+      operationMessage = error.message ?? '变焦调整失败，请稍后重试。';
+    }
     notifyListeners();
+  }
+
+  Future<CameraQualityState> setEnhancementMode(String mode) async {
+    final channel = _channel;
+    if (channel == null || !_ready || _busy) {
+      throw PlatformException(code: 'camera_busy', message: '相机正在处理中，请稍后再试。');
+    }
+    await (_configurationFuture ?? Future<void>.value());
+    _busy = true;
+    notifyListeners();
+    try {
+      final result = await channel.invokeMapMethod<String, Object?>(
+        'setEnhancementMode', {'mode': mode},
+      );
+      _applyZoomState(result);
+      return _quality!;
+    } finally {
+      _busy = false;
+      notifyListeners();
+    }
   }
 
   Future<void> configureCapture({
@@ -842,7 +876,7 @@ class _NativeCameraController extends ChangeNotifier {
 
   Future<void> setFlashMode(String mode) async {
     final channel = _channel;
-    if (channel == null || !_ready) {
+    if (channel == null || !_ready || _busy || _configuringCapture) {
       return;
     }
 
@@ -857,10 +891,12 @@ class _NativeCameraController extends ChangeNotifier {
 
   Future<void> switchLens() async {
     final channel = _channel;
-    if (channel == null || !_ready) {
+    if (channel == null || !_ready || _busy || _configuringCapture) {
       return;
     }
 
+    _busy = true;
+    notifyListeners();
     try {
       final result = await channel.invokeMapMethod<String, Object?>(
         'switchLens',
@@ -868,11 +904,14 @@ class _NativeCameraController extends ChangeNotifier {
       _applyZoomState(result);
       _appliedInitialZoomRatio = null;
       await _runCaptureConfiguration();
-    } on PlatformException {
+    } on PlatformException catch (error) {
+      operationMessage = error.message ?? '镜头切换失败，请稍后重试。';
       final result = await channel.invokeMapMethod<String, Object?>(
         'getZoomState',
       );
       _applyZoomState(result);
+    } finally {
+      _busy = false;
     }
     notifyListeners();
   }
@@ -890,9 +929,14 @@ class _NativeCameraController extends ChangeNotifier {
     _busy = true;
     notifyListeners();
     try {
-      return await channel.invokeMethod<String>('takePicture', {
+      final path = await channel.invokeMethod<String>('takePicture', {
         if (location != null) ...location.toPlatformArguments(),
       });
+      _applyZoomState(await channel.invokeMapMethod<String, Object?>('getZoomState'));
+      return path;
+    } on PlatformException catch (error) {
+      operationMessage = error.message ?? '照片拍摄失败，请重试。';
+      return null;
     } finally {
       _busy = false;
       notifyListeners();
@@ -920,8 +964,16 @@ class _NativeCameraController extends ChangeNotifier {
 
   @override
   void dispose() {
-    _channel?.invokeMethod<void>('dispose');
+    _disposed = true;
+    _ready = false;
+    _channel?.invokeMethod<void>('dispose').catchError((_) {});
+    _channel = null;
     super.dispose();
+  }
+
+  @override
+  void notifyListeners() {
+    if (!_disposed) super.notifyListeners();
   }
 
   void _applyZoomState(Map<String, Object?>? state) {
@@ -936,6 +988,7 @@ class _NativeCameraController extends ChangeNotifier {
     _lensMode = state['lensMode'] as String? ?? _lensMode;
     _supportsTelephoto =
         (state['supportsTelephoto'] as bool?) ?? _supportsTelephoto;
+    _quality = CameraQualityState.fromPlatform(state['quality']);
   }
 
   Future<void> _runCaptureConfiguration() async {
@@ -983,6 +1036,7 @@ class _NativeCameraController extends ChangeNotifier {
 
         appliedGeneration = generation;
       }
+      _applyZoomState(await channel.invokeMapMethod<String, Object?>('getZoomState'));
     } finally {
       _configuringCapture = false;
       notifyListeners();
@@ -1034,6 +1088,17 @@ class _NativeReferenceCameraBody extends StatelessWidget {
     return AnimatedBuilder(
       animation: controller,
       builder: (context, child) {
+        final message = controller.operationMessage;
+        if (message != null) {
+          controller.operationMessage = null;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showStatusSnack(
+                kind: AppStatusBannerKind.warning, title: message,
+              );
+            }
+          });
+        }
         unawaited(
           controller.configureCapture(
             captureAspectRatio: captureAspectRatio,
@@ -1398,6 +1463,41 @@ class _CameraLayoutMetrics {
   }
 }
 
+class _NativeCameraQualityButton extends StatelessWidget {
+  const _NativeCameraQualityButton({required this.controller, this.size = 44});
+
+  final _NativeCameraController controller;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final quality = controller.quality;
+    if (quality == null) return const SizedBox.shrink();
+    return _CameraCircleButton(
+      size: size,
+      tooltip: '拍摄画质：${quality.lensLabel} · ${quality.activeLabel}',
+      icon: LucideIcons.sparkles,
+      text: '画质',
+      badge: switch (quality.activeMode) {
+        'hdr' => 'HDR', 'night' => 'N', 'auto' => 'A', _ => null,
+      },
+      onPressed: () {
+        if (controller.busy || controller.configuringCapture) return;
+        showModalBottomSheet<void>(
+          context: context,
+          isScrollControlled: true,
+          useSafeArea: true,
+          showDragHandle: true,
+          builder: (_) => CameraQualitySheet(
+            state: quality,
+            onSelectMode: controller.setEnhancementMode,
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _NativeCameraTopBar extends StatelessWidget {
   const _NativeCameraTopBar({
     required this.controller,
@@ -1424,6 +1524,8 @@ class _NativeCameraTopBar extends StatelessWidget {
             onPressed: () => Navigator.of(context).maybePop(),
           ),
           const Spacer(),
+          _NativeCameraQualityButton(controller: controller),
+          const SizedBox(width: 8),
           _CameraCircleButton(
             tooltip: '参考图',
             icon: LucideIcons.image,
@@ -1573,6 +1675,7 @@ class _NativeLandscapeCameraLayout extends StatelessWidget {
                 child: Row(
                   children: [
                     _NativeLandscapeLeftRail(
+                      controller: controller,
                       metrics: metrics,
                       mode: mode,
                       onModeChanged: onModeChanged,
@@ -1623,6 +1726,7 @@ class _NativeLandscapeCameraLayout extends StatelessWidget {
 
 class _NativeLandscapeLeftRail extends StatelessWidget {
   const _NativeLandscapeLeftRail({
+    required this.controller,
     required this.metrics,
     required this.mode,
     required this.onModeChanged,
@@ -1630,6 +1734,7 @@ class _NativeLandscapeLeftRail extends StatelessWidget {
     required this.onPickReference,
   });
 
+  final _NativeCameraController controller;
   final _CameraLayoutMetrics metrics;
   final AwesomeReferenceMode mode;
   final ValueChanged<AwesomeReferenceMode> onModeChanged;
@@ -1645,7 +1750,8 @@ class _NativeLandscapeLeftRail extends StatelessWidget {
         width: metrics.leftRailWidth,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
-          child: Column(
+          child: SingleChildScrollView(
+            child: Column(
             children: [
               _CameraCircleButton(
                 size: metrics.controlButtonSize,
@@ -1663,6 +1769,12 @@ class _NativeLandscapeLeftRail extends StatelessWidget {
                 icon: LucideIcons.image,
                 onPressed: onPickReference,
               ),
+              if (controller.quality != null) ...[
+                SizedBox(height: metrics.leftGap),
+                _NativeCameraQualityButton(
+                  controller: controller, size: metrics.controlButtonSize,
+                ),
+              ],
               SizedBox(height: metrics.leftGap + 2),
               _ModeColumnSelector(
                 metrics: metrics,
@@ -1670,6 +1782,7 @@ class _NativeLandscapeLeftRail extends StatelessWidget {
                 onChanged: onModeChanged,
               ),
             ],
+            ),
           ),
         ),
       ),
