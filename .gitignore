@@ -57,3 +57,4 @@ app.*.map.json
 /android/app/release
 /android/build/
 /android/key.properties
+/android/projecttabi-signing-backup.txt
