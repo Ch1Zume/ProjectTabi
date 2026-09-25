@@ -14,6 +14,10 @@ When you configure WebDAV and choose a sync direction, ProjectTabi transmits the
 
 Sync failure details remain on screen until dismissed or replaced; they are not automatically sent to the app authors. You can copy them yourself when requesting support.
 
+## App updates
+
+When automatic checks are enabled (the default), opening the app can fetch a public update manifest from GitHub once per day. Optional Wi-Fi automatic downloads fetch signed installation packages. No plans, photos, WebDAV credentials, or sync history are sent. GitHub receives ordinary network request information. Update preferences and download state remain on the device. Android may request permission to install the downloaded app update.
+
 ## Device permissions
 
 ProjectTabi may request:
@@ -59,6 +63,10 @@ ProjectTabi 是一款优先在本地保存数据的圣地巡礼计划与记录�
 配置 WebDAV 并选择同步方向后，ProjectTabi 会将所选计划、记录及关联图片传到你配置的 WebDAV 服务器，或从该服务器下载。服务器运营者可依其服务条款和隐私政策访问服务器上存储的数据。ProjectTabi 不运营该服务器，服务器地址和账号由你自行配置。
 
 同步错误详情只会显示在应用中，不会自动发送给开发者。你可以在反馈问题时主动复制并提交。
+
+## 应用更新
+
+自动检查默认开启，打开应用时每天最多从 GitHub 获取一次公开更新信息；可选的仅 Wi-Fi 自动下载会获取安装包。此过程不上传计划、照片、WebDAV 凭据或同步历史，GitHub 会收到常规网络请求信息。更新偏好和下载状态只保存在本机。Android 安装更新时可能要求授予安装应用权限。
 
 ## 系统权限
 

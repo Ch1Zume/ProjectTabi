@@ -13,6 +13,8 @@ ProjectTabi 是一款面向 Windows 和 Android 的圣地巡礼计划与记录�
 
 每个 Release 提供 Windows NSIS 安装包（`*-windows-setup.exe`）和 Android APK。Windows 安装包用于安装和后续覆盖更新；Android APK 使用固定的应用 ID 和发布签名，未来版本以递增版本号安装更新。
 
+从 0.1.1 构建 3 起，打开应用会自动检查更新，也可进入“设置 → 关于 ProjectTabi → 应用更新”查看更新说明、下载安装包。支持可选的仅 Wi-Fi 自动下载，安装前仍由用户确认。已安装更早构建的用户需先手动覆盖安装一次。
+
 ProjectTabi 是独立的新应用，第一次安装时不会覆盖 MiriaGo。Android 使用新的应用 ID，因此需要单独安装；Windows 也使用 ProjectTabi 的新数据目录。后续 ProjectTabi 更新沿用自己的安装身份和签名。
 
 ## 从 MiriaGo 迁移数据

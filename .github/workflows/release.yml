@@ -3,6 +3,7 @@ name: ProjectTabi Release Packages
 on:
   workflow_dispatch:
   push:
+    branches: ['codex/in-app-updater']
     tags:
       - 'v*'
 
@@ -24,11 +25,8 @@ jobs:
           channel: stable
           cache: true
       - name: Check release tag matches app version
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          app_version="$(sed -n 's/^version: \([0-9.]*\)+.*/\1/p' pubspec.yaml)"
-          tag_version="${GITHUB_REF_NAME#v}"
-          test "$app_version" = "$tag_version" || { echo "Tag $tag_version must match pubspec version $app_version"; exit 1; }
+        id: metadata
+        run: python3 tool/release_metadata.py
       - name: Restore persistent Android signing key
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -37,6 +35,8 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: python3 tool/restore_android_signing.py --require
       - run: flutter pub get
+      - name: Analyze update integration
+        run: flutter analyze lib/update lib/app_version.dart lib/main.dart lib/settings/settings_screen.dart lib/sync/sync_guard_repository.dart
       - name: Build Android package
         run: flutter build apk --release --no-pub
       - name: Find previous release APK
@@ -45,7 +45,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          previous_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName // ""' || true)"
+          previous_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 --json tagName --jq 'map(select(.tagName != env.GITHUB_REF_NAME)) | .[0].tagName // ""' || true)"
           if [ -n "$previous_tag" ]; then
             mkdir -p previous-apk
             gh release download "$previous_tag" --repo "$GITHUB_REPOSITORY" --pattern 'ProjectTabi-*.apk' --dir previous-apk
@@ -63,7 +63,9 @@ jobs:
             bash tool/check_android_update.sh "$current_apk"
           fi
       - name: Package APK
-        run: cp build/app/outputs/flutter-apk/app-release.apk "ProjectTabi-$GITHUB_REF_NAME.apk"
+        env:
+          PACKAGE_STEM: ${{ steps.metadata.outputs.stem }}
+        run: cp build/app/outputs/flutter-apk/app-release.apk "$PACKAGE_STEM.apk"
       - uses: actions/upload-artifact@v4
         with:
           name: projecttabi-android
@@ -88,26 +90,38 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - name: Check release tag matches app version
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        run: |
-          app_version="$(sed -n 's/^version: \([0-9.]*\)+.*/\1/p' pubspec.yaml)"
-          tag_version="${GITHUB_REF_NAME#v}"
-          test "$app_version" = "$tag_version" || { echo "Tag $tag_version must match pubspec version $app_version"; exit 1; }
+        id: metadata
+        run: python tool/release_metadata.py
       - run: flutter pub get
       - run: npm ci
       - name: Build Windows installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run desktop:build
+      - name: Save resolved desktop dependencies
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: projecttabi-cargo-lock
+          path: src-tauri/Cargo.lock
       - name: Package Windows setup
         shell: pwsh
+        env:
+          PACKAGE_STEM: ${{ steps.metadata.outputs.stem }}
         run: |
           $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis/*.exe' | Select-Object -First 1
           if (-not $installer) { throw 'Tauri NSIS installer was not created.' }
-          Copy-Item $installer.FullName "ProjectTabi-$env:GITHUB_REF_NAME-windows-setup.exe"
+          $signature = "$($installer.FullName).sig"
+          if (-not (Test-Path -LiteralPath $signature)) { throw 'Windows updater signature was not created.' }
+          Copy-Item $installer.FullName "$env:PACKAGE_STEM-windows-setup.exe"
+          Copy-Item $signature "$env:PACKAGE_STEM-windows-setup.exe.sig"
       - uses: actions/upload-artifact@v4
         with:
           name: projecttabi-windows
-          path: ProjectTabi-*-windows-setup.exe
+          path: |
+            ProjectTabi-*-windows-setup.exe
+            ProjectTabi-*-windows-setup.exe.sig
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -119,9 +133,17 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+          pattern: projecttabi-*
+      - name: Generate update feed and release notes
+        run: python3 tool/release_metadata.py --assets release-assets
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-assets/*
-          body_path: PATCH_NOTES.md
+          files: |
+            release-assets/ProjectTabi-*
+            release-assets/latest.json
+          body_path: RELEASE_NOTES.md
+          name: ProjectTabi ${{ github.ref_name }}
+          prerelease: false
+          make_latest: true
           generate_release_notes: true

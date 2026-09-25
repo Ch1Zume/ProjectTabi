@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../update/update_activity.dart';
 import '../data/pilgrimage_repository.dart';
 import '../data/sample_pilgrimage_repository.dart';
 import '../plan/pilgrimage_models.dart';
@@ -14,6 +15,7 @@ class SyncGuardRepository implements PilgrimageRepository, SyncRepository {
   Future<void> _tail = Future.value();
   bool get inExclusiveSync => identical(Zone.current[_zoneKey], this);
   Future<T> _enqueue<T>(Future<T> Function() action) {
+    UpdateActivity.begin();
     final result = Completer<T>();
     final previous = _tail;
     _tail = () async {
@@ -22,6 +24,8 @@ class SyncGuardRepository implements PilgrimageRepository, SyncRepository {
         result.complete(await action());
       } catch (error, stack) {
         result.completeError(error, stack);
+      } finally {
+        UpdateActivity.end();
       }
     }();
     return result.future;

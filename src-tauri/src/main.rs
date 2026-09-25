@@ -7,6 +7,7 @@ mod desktop_db;
 mod linux_locale;
 mod startup_log;
 mod storage;
+mod updater;
 
 fn main() {
     startup_log::install_panic_hook();
@@ -17,6 +18,8 @@ fn main() {
     ));
 
     let result = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updater::ManagedUpdater::default())
         .setup(|_app| {
             #[cfg(target_os = "linux")]
             linux_locale::configure(_app)?;
@@ -30,6 +33,7 @@ fn main() {
             ));
         })
         .invoke_handler(tauri::generate_handler![
+            updater::updater_command,
             commands::launcher_info,
             commands::ensure_data_dirs,
             commands::append_desktop_log,
