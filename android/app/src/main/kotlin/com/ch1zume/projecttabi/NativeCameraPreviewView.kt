@@ -4,7 +4,11 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.location.Location
 import android.os.Build
 import android.util.Rational
@@ -19,6 +23,7 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
@@ -72,6 +77,8 @@ class NativeCameraPreviewView(
     private var qualityNotice = ""
     private var lastIssue = ""
     private var lastCaptureSize = ""
+    @Volatile private var reportedPhysicalCamera = "系统未提供"
+    @Volatile private var reportedFocalLength = "系统未提供"
     private var disposed = false
     private var captureInProgress = false
     private var flashMode = ImageCapture.FLASH_MODE_AUTO
@@ -226,10 +233,24 @@ class NativeCameraPreviewView(
 
     private fun bindUseCases(provider: ProcessCameraProvider, selector: CameraSelector, zoom: Float) {
         val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
-        val preview = Preview.Builder()
+        reportedPhysicalCamera = "系统未提供"
+        reportedFocalLength = "系统未提供"
+        val previewBuilder = Preview.Builder()
             .setTargetAspectRatio(cameraTargetAspectRatio())
             .setTargetRotation(rotation)
-            .build()
+        if (activeEnhancement == "off") {
+            Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                        reportedFocalLength = result.get(CaptureResult.LENS_FOCAL_LENGTH)?.toString() ?: "系统未提供"
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            reportedPhysicalCamera = result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID) ?: "系统未提供"
+                        }
+                    }
+                },
+            )
+        }
+        val preview = previewBuilder.build()
             .also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
@@ -263,11 +284,14 @@ class NativeCameraPreviewView(
             result.error("invalid_enhancement", "请选择有效的画质模式。", null)
             return
         }
+        val previous = requestedEnhancement
         requestedEnhancement = mode
         try {
             bindCamera()
             result.success(zoomStateMap())
         } catch (error: Exception) {
+            requestedEnhancement = previous
+            runCatching { bindCamera() }
             result.error("camera_enhancement_failed", "画质模式切换失败，请重新打开拍摄页面。", null)
         }
     }
@@ -568,6 +592,7 @@ class NativeCameraPreviewView(
             "activeMode" to activeEnhancement,
             "availableModes" to supportedEnhancements.toList(),
             "lensLabel" to lens,
+            "telephotoAvailable" to (telephotoCamera != null),
             "notice" to qualityNotice,
             "outputSize" to outputSize,
             "diagnostics" to listOf(
@@ -578,6 +603,7 @@ class NativeCameraPreviewView(
                 "镜头: $lens / cameraId=$cameraId",
                 "独立长焦: ${telephotoCamera ?: "未检测到可访问镜头"}",
                 "当前物理镜头: ${if (lensMode == NativeLensMode.BackTelephoto) telephotoCamera?.physicalCameraId ?: "独立相机" else "由系统选择"}",
+                "预览实际镜头: $reportedPhysicalCamera / 实际焦距(mm): $reportedFocalLength",
                 "增强请求: $requestedEnhancement / 实际: $activeEnhancement",
                 "可用增强: ${supportedEnhancements.joinToString().ifEmpty { "无" }}",
                 "变焦: ${camera?.cameraInfo?.zoomState?.value?.zoomRatio} / 光学倍率估计: ${zoomScale()}",
