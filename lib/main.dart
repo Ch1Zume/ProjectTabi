@@ -27,6 +27,9 @@ Future<void> main() async {
     yield LicenseEntryWithLineBreaks([
       'ProjectTabi Readable Dark / OpenFreeMap / OpenMapTiles',
     ], await rootBundle.loadString('assets/maps/LICENSE.txt'));
+    yield LicenseEntryWithLineBreaks([
+      'ProjectTabi Footprint Boundaries / Natural Earth / 国土数値情報 / DataV.GeoAtlas',
+    ], await rootBundle.loadString('assets/footprint/LICENSE.txt'));
   });
   if (!kIsWeb) {
     await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);

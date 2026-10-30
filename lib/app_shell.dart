@@ -11,6 +11,7 @@ import 'data/anitabi_image_source_scope.dart';
 import 'data/anitabi_service_config.dart';
 import 'data/pilgrimage_repository.dart';
 import 'data/sample_pilgrimage_repository.dart';
+import 'footprint/footprint_screen.dart';
 import 'map/pilgrimage_map_screen.dart';
 import 'plan/add_points_screen.dart';
 import 'plan/plan_manager_screen.dart';
@@ -344,6 +345,15 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                           settings: _settings,
                         ),
                       ),
+                      TickerMode(
+                        enabled: _selectedIndex == 2,
+                        child: FootprintScreen(
+                          isActive: _selectedIndex == 2,
+                          repository: widget.repository,
+                          controller: controller,
+                          settings: _settings,
+                        ),
+                      ),
                       RecordsScreen(
                         controller: controller,
                         settings: _settings,
@@ -403,6 +413,12 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                           icon: Icon(LucideIcons.map),
                           selectedIcon: Icon(LucideIcons.map),
                           label: '地图',
+                          tooltip: '',
+                        ),
+                        NavigationDestination(
+                          icon: Icon(LucideIcons.globe),
+                          selectedIcon: Icon(LucideIcons.globe),
+                          label: '足迹',
                           tooltip: '',
                         ),
                         NavigationDestination(

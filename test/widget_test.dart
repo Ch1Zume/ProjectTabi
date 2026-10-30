@@ -948,12 +948,13 @@ void main() {
     const expectedIcons = [
       LucideIcons.listTodo,
       LucideIcons.map,
+      LucideIcons.globe,
       LucideIcons.images,
       LucideIcons.settings,
     ];
-    const expectedLabels = ['计划', '地图', '记录', '设置'];
+    const expectedLabels = ['计划', '地图', '足迹', '记录', '设置'];
 
-    expect(destinations, hasLength(4));
+    expect(destinations, hasLength(5));
     for (var index = 0; index < destinations.length; index += 1) {
       expect(destinations[index].label, expectedLabels[index]);
       expect((destinations[index].icon as Icon).icon, expectedIcons[index]);
