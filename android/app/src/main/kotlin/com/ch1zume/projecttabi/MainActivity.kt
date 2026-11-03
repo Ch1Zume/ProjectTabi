@@ -21,6 +21,7 @@ class MainActivity : FlutterActivity() {
     private var pendingPlanPath: String? = null
     private var mapHeading: MapHeadingStream? = null
     private var appUpdater: AppUpdater? = null
+    private var travelPhotoPicker: TravelPhotoPicker? = null
 
     override fun onResume() {
         super.onResume()
@@ -35,6 +36,8 @@ class MainActivity : FlutterActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         appUpdater?.close()
         appUpdater = null
+        travelPhotoPicker?.close()
+        travelPhotoPicker = null
         mapHeading?.onCancel(null)
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, "miriago/map_heading")
             .setStreamHandler(null)
@@ -45,6 +48,7 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         appUpdater = AppUpdater(this, flutterEngine.dartExecutor.binaryMessenger)
+        travelPhotoPicker = TravelPhotoPicker(this, flutterEngine.dartExecutor.binaryMessenger)
         mapHeading = MapHeadingStream(this)
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, "miriago/map_heading")
             .setStreamHandler(mapHeading)
@@ -142,6 +146,12 @@ class MainActivity : FlutterActivity() {
         } catch (_: SecurityException) {
             false
         }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (travelPhotoPicker?.onActivityResult(requestCode, resultCode, data) == true) return
+        super.onActivityResult(requestCode, resultCode, data)
     }
 
     override fun onNewIntent(intent: Intent) {

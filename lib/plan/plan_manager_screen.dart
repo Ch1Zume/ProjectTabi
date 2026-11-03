@@ -3,6 +3,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../app_theme.dart';
 import '../data/pilgrimage_repository.dart';
+import '../footprint/footprint_data.dart';
+import '../footprint/footprint_preferences.dart';
 import '../plan_transfer/import_export_screen.dart';
 import '../widgets/confirm_action_dialog.dart';
 import '../widgets/input_dialog.dart';
@@ -62,7 +64,12 @@ class _PlanManagerScreenState extends State<PlanManagerScreen> {
     });
 
     try {
-      final plans = await widget.repository.loadPlans();
+      final travelPlanId = FootprintPreferences.instance.travelPlanId;
+      // Travel photos live in their own plan, managed from the footprint map.
+      final plans = [
+        for (final plan in await widget.repository.loadPlans())
+          if (!isTravelPlan(plan, knownId: travelPlanId)) plan,
+      ];
       final activePlan = await widget.repository.loadActivePlan();
       if (!mounted) {
         return;

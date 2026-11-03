@@ -11,9 +11,13 @@ import '../records/visit_record_photo_stub.dart'
 import '../widgets/image_viewer_screen.dart';
 import 'country_colors.dart';
 import 'footprint_data.dart';
+import 'footprint_preferences.dart';
 import 'globe_view.dart';
 import 'region_data.dart';
 import 'region_map_view.dart';
+import 'travel_import_screen.dart';
+import 'travel_journal.dart';
+import 'travel_photo_files.dart';
 
 /// Life footprint map: a globe of visited countries that drills down to
 /// provinces, cities and finally the records on the real map.
@@ -39,16 +43,28 @@ class _FootprintScreenState extends State<FootprintScreen> {
   final RegionCatalog _catalog = RegionCatalog();
   final GlobeCamera _globeCamera = GlobeCamera();
   final List<FootprintMapLevel> _levels = [];
-  FootprintIndex? _index;
+  final FootprintPreferences _preferences = FootprintPreferences.instance;
+
+  /// Index of every footprint; the map shows it under the chosen filter.
+  FootprintIndex? _fullIndex;
+
+  /// Snapshot of the representative photo picks, replaced on every change so
+  /// the maps notice it.
+  Map<String, String> _photoPicks = const {};
   Object? _error;
   bool _loading = false;
   bool _opening = false;
+  bool _importing = false;
   bool _centeredOnFootprints = false;
   int _loadGeneration = 0;
+
+  FootprintIndex? get _index => _fullIndex?.filtered(_preferences.filter);
 
   @override
   void initState() {
     super.initState();
+    _preferences.addListener(_onPreferencesChanged);
+    _preferences.load();
     if (widget.isActive) {
       _load();
     }
@@ -60,6 +76,18 @@ class _FootprintScreenState extends State<FootprintScreen> {
     // Records may have changed in other tabs; refresh when shown again.
     if (widget.isActive && !oldWidget.isActive) {
       _load();
+    }
+  }
+
+  @override
+  void dispose() {
+    _preferences.removeListener(_onPreferencesChanged);
+    super.dispose();
+  }
+
+  void _onPreferencesChanged() {
+    if (mounted) {
+      setState(() => _photoPicks = Map.unmodifiable(_preferences.regionPhotos));
     }
   }
 
@@ -79,7 +107,7 @@ class _FootprintScreenState extends State<FootprintScreen> {
         _centerGlobeOnFootprints(index);
       }
       setState(() {
-        _index = index;
+        _fullIndex = index;
         _loading = false;
       });
     } catch (error, stackTrace) {
@@ -112,7 +140,7 @@ class _FootprintScreenState extends State<FootprintScreen> {
 
   Future<void> _enterCountry(RegionFeature country) async {
     await _open(() async {
-      final index = _index!;
+      final world = _fullIndex!.world;
       final divisions = country.hasChildren
           ? await _catalog.admin1(country.id)
           : null;
@@ -124,7 +152,7 @@ class _FootprintScreenState extends State<FootprintScreen> {
         region: country,
         children: divisions.features,
         context: [
-          for (final other in index.world.features)
+          for (final other in world.features)
             if (other.id != country.id && other.bounds.overlaps(frame)) other,
         ],
         lines: divisions.lines,
@@ -176,6 +204,81 @@ class _FootprintScreenState extends State<FootprintScreen> {
     }
   }
 
+  Future<void> _importTravelPhotos() async {
+    if (_importing) {
+      return;
+    }
+    setState(() => _importing = true);
+    try {
+      final photos = await pickTravelPhotos();
+      if (photos.isEmpty || !mounted) {
+        return;
+      }
+      final saved = await Navigator.of(context).push<int>(
+        MaterialPageRoute(
+          builder: (_) => TravelImportScreen(
+            photos: photos,
+            repository: widget.repository,
+            catalog: _catalog,
+            settings: widget.settings,
+          ),
+        ),
+      );
+      if (saved != null && saved > 0 && mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('已添加 $saved 张旅行照片')));
+        await _load();
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('无法读取照片：$error')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _importing = false);
+      }
+    }
+  }
+
+  Future<void> _openDisplaySettings() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      backgroundColor: AppColors.surface,
+      showDragHandle: true,
+      builder: (_) => _FootprintDisplaySheet(preferences: _preferences),
+    );
+  }
+
+  Future<void> _pickRegionPhoto(RegionFeature region) async {
+    final index = _index;
+    if (index == null) {
+      return;
+    }
+    final entries = index.entriesIn(region.id);
+    final current = index.representativeOf(region.id, _photoPicks);
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: AppColors.surface,
+      showDragHandle: true,
+      builder: (context) => _RegionPhotoPickerSheet(
+        region: region,
+        entries: entries,
+        selectedId: current?.record.id,
+        hasManualPick: _photoPicks.containsKey(region.id),
+        onSelect: (recordId) {
+          Navigator.of(context).pop();
+          _preferences.setRegionPhoto(region.id, recordId);
+        },
+      ),
+    );
+  }
+
   Future<void> _openEntries(String title, List<FootprintEntry> entries) async {
     if (entries.isEmpty) {
       return;
@@ -190,17 +293,47 @@ class _FootprintScreenState extends State<FootprintScreen> {
         title: title,
         entries: entries,
         activePlanId: widget.controller.plan.id,
+        travelColor: _preferences.travelColor,
+        pilgrimageColor: _preferences.pilgrimageColor,
         onOpen: _openEntry,
+        onDelete: _deleteTravelEntry,
       ),
     );
+  }
+
+  Future<void> _deleteTravelEntry(FootprintEntry entry) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除这张旅行照片？'),
+        content: Text('“${entry.record.displayPointNameSnapshot}”的记录和地点会一起删除。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+    await TravelJournal(widget.repository).delete(entry);
+    if (mounted) {
+      await _load();
+    }
   }
 
   Future<void> _openEntry(FootprintEntry entry) async {
     final controller = widget.controller;
     final record = entry.record;
     if (record.planId != controller.plan.id) {
-      // Details and editing go through the active plan's controller; other
-      // plans only offer the photo.
+      // Details and editing go through the active plan's controller; travel
+      // photos and other plans only offer the photo.
       final path = resolveVisitRecordDisplayPhotoPath(record);
       if (path != null) {
         await ImageViewerScreen.show(context, filePath: path);
@@ -251,12 +384,34 @@ class _FootprintScreenState extends State<FootprintScreen> {
           ),
           actions: [
             IconButton(
+              tooltip: '添加旅行照片',
+              onPressed: _importing ? null : _importTravelPhotos,
+              icon: const Icon(LucideIcons.imagePlus),
+            ),
+            IconButton(
+              tooltip: '显示与颜色',
+              onPressed: _openDisplaySettings,
+              icon: const Icon(LucideIcons.palette),
+            ),
+            IconButton(
               tooltip: '刷新足迹',
               onPressed: _loading ? null : _load,
               icon: const Icon(LucideIcons.refreshCw),
             ),
             const SizedBox(width: 8),
           ],
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(48),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: _FilterBar(
+                filter: _preferences.filter,
+                travelColor: _preferences.travelColor,
+                pilgrimageColor: _preferences.pilgrimageColor,
+                onChanged: _preferences.setFilter,
+              ),
+            ),
+          ),
         ),
         body: index == null
             ? _FootprintLoadState(
@@ -290,7 +445,11 @@ class _FootprintScreenState extends State<FootprintScreen> {
                     level: level,
                     index: index,
                     settings: widget.settings,
+                    photoPicks: _photoPicks,
+                    travelColor: _preferences.travelColor,
+                    pilgrimageColor: _preferences.pilgrimageColor,
                     onEnterChild: _enterChild,
+                    onLongPressRegion: _pickRegionPhoto,
                     onOpenEntries: (entries) => _openEntries(
                       entries.first.record.displayPointNameSnapshot,
                       entries,
@@ -320,6 +479,13 @@ class _FootprintScreenState extends State<FootprintScreen> {
               ),
             ),
           ),
+        if (index.allEntries.isEmpty)
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 72,
+            child: _EmptyFootprintHint(onImport: _importTravelPhotos),
+          ),
         if (_loading)
           const Positioned(
             left: 0,
@@ -328,6 +494,294 @@ class _FootprintScreenState extends State<FootprintScreen> {
             child: LinearProgressIndicator(minHeight: 2),
           ),
       ],
+    );
+  }
+}
+
+class _FilterBar extends StatelessWidget {
+  const _FilterBar({
+    required this.filter,
+    required this.travelColor,
+    required this.pilgrimageColor,
+    required this.onChanged,
+  });
+
+  final FootprintFilter filter;
+  final Color travelColor;
+  final Color pilgrimageColor;
+  final ValueChanged<FootprintFilter> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget dot(Color color) => Container(
+      width: 10,
+      height: 10,
+      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+    );
+    return SizedBox(
+      width: double.infinity,
+      child: SegmentedButton<FootprintFilter>(
+        showSelectedIcon: false,
+        style: const ButtonStyle(visualDensity: VisualDensity.compact),
+        segments: [
+          const ButtonSegment(value: FootprintFilter.all, label: Text('全部')),
+          ButtonSegment(
+            value: FootprintFilter.travel,
+            icon: dot(travelColor),
+            label: const Text('旅行'),
+          ),
+          ButtonSegment(
+            value: FootprintFilter.pilgrimage,
+            icon: dot(pilgrimageColor),
+            label: const Text('圣地巡礼'),
+          ),
+        ],
+        selected: {filter},
+        onSelectionChanged: (selection) => onChanged(selection.single),
+      ),
+    );
+  }
+}
+
+class _FootprintDisplaySheet extends StatelessWidget {
+  const _FootprintDisplaySheet({required this.preferences});
+
+  final FootprintPreferences preferences;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: preferences,
+      builder: (context, _) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '标点颜色',
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '市级地图上，旅行照片和圣地巡礼记录用不同颜色的外圈区分。',
+              style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+            _ColorRow(
+              label: '旅行',
+              selected: preferences.travelColor,
+              onSelect: preferences.setTravelColor,
+            ),
+            const SizedBox(height: 12),
+            _ColorRow(
+              label: '圣地巡礼',
+              selected: preferences.pilgrimageColor,
+              onSelect: preferences.setPilgrimageColor,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              '在国家或省级地图上长按已点亮的区域，可以更换它的代表照片。',
+              style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ColorRow extends StatelessWidget {
+  const _ColorRow({
+    required this.label,
+    required this.selected,
+    required this.onSelect,
+  });
+
+  final String label;
+  final Color selected;
+  final ValueChanged<Color> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 72,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final color in footprintKindColorChoices)
+                Semantics(
+                  button: true,
+                  selected: color == selected,
+                  label: '$label颜色',
+                  child: GestureDetector(
+                    onTap: () => onSelect(color),
+                    child: Container(
+                      width: 30,
+                      height: 30,
+                      decoration: BoxDecoration(
+                        color: color,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: color == selected
+                              ? AppColors.textPrimary
+                              : Colors.transparent,
+                          width: 2.5,
+                        ),
+                      ),
+                      child: color == selected
+                          ? const Icon(
+                              LucideIcons.check,
+                              size: 16,
+                              color: Colors.white,
+                            )
+                          : null,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _RegionPhotoPickerSheet extends StatelessWidget {
+  const _RegionPhotoPickerSheet({
+    required this.region,
+    required this.entries,
+    required this.selectedId,
+    required this.hasManualPick,
+    required this.onSelect,
+  });
+
+  final RegionFeature region;
+  final List<FootprintEntry> entries;
+  final String? selectedId;
+  final bool hasManualPick;
+
+  /// Called with null to go back to the automatic choice.
+  final ValueChanged<String?> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.6,
+      minChildSize: 0.3,
+      maxChildSize: 0.92,
+      builder: (context, scrollController) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 12, 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${region.name}的代表照片',
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                if (hasManualPick)
+                  TextButton(
+                    onPressed: () => onSelect(null),
+                    child: const Text('恢复自动'),
+                  ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: GridView.builder(
+              controller: scrollController,
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 140,
+                mainAxisSpacing: 8,
+                crossAxisSpacing: 8,
+              ),
+              itemCount: entries.length,
+              itemBuilder: (context, index) {
+                final entry = entries[index];
+                final selected = entry.record.id == selectedId;
+                return GestureDetector(
+                  onTap: () => onSelect(entry.record.id),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: selected ? AppColors.accentDark : Colors.transparent,
+                        width: 3,
+                      ),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(9),
+                      child: VisitRecordPhoto(
+                        path: resolveVisitRecordDisplayPhotoPath(entry.record),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EmptyFootprintHint extends StatelessWidget {
+  const _EmptyFootprintHint({required this.onImport});
+
+  final VoidCallback onImport;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.surface,
+      elevation: 2,
+      borderRadius: BorderRadius.circular(18),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                '还没有足迹。拍摄巡礼记录，或导入带位置的旅行照片来点亮地图。',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.tonalIcon(
+              onPressed: onImport,
+              icon: const Icon(LucideIcons.imagePlus, size: 18),
+              label: const Text('导入'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -589,13 +1043,19 @@ class _FootprintEntriesSheet extends StatelessWidget {
     required this.title,
     required this.entries,
     required this.activePlanId,
+    required this.travelColor,
+    required this.pilgrimageColor,
     required this.onOpen,
+    required this.onDelete,
   });
 
   final String title;
   final List<FootprintEntry> entries;
   final String activePlanId;
+  final Color travelColor;
+  final Color pilgrimageColor;
   final Future<void> Function(FootprintEntry entry) onOpen;
+  final Future<void> Function(FootprintEntry entry) onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -627,13 +1087,21 @@ class _FootprintEntriesSheet extends StatelessWidget {
                 separatorBuilder: (_, _) => const SizedBox(height: 8),
                 itemBuilder: (context, index) {
                   final entry = entries[index];
+                  final travel = entry.kind == FootprintKind.travel;
                   return _FootprintEntryTile(
                     entry: entry,
                     inActivePlan: entry.record.planId == activePlanId,
+                    kindColor: travel ? travelColor : pilgrimageColor,
                     onTap: () async {
                       Navigator.of(context).pop();
                       await onOpen(entry);
                     },
+                    onLongPress: travel
+                        ? () async {
+                            Navigator.of(context).pop();
+                            await onDelete(entry);
+                          }
+                        : null,
                   );
                 },
               ),
@@ -649,12 +1117,18 @@ class _FootprintEntryTile extends StatelessWidget {
   const _FootprintEntryTile({
     required this.entry,
     required this.inActivePlan,
+    required this.kindColor,
     required this.onTap,
+    this.onLongPress,
   });
 
   final FootprintEntry entry;
   final bool inActivePlan;
+  final Color kindColor;
   final VoidCallback onTap;
+
+  /// Only travel photos can be deleted here.
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -663,17 +1137,29 @@ class _FootprintEntryTile extends StatelessWidget {
     final dateText =
         '${date.year}-${date.month.toString().padLeft(2, '0')}-'
         '${date.day.toString().padLeft(2, '0')}';
-    final work = record.displayWorkTitleSnapshot;
+    final work = entry.kind == FootprintKind.travel
+        ? '旅行照片 · 长按可删除'
+        : record.displayWorkTitleSnapshot;
     return Material(
       color: AppColors.surfaceMuted,
       borderRadius: BorderRadius.circular(14),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
+        onLongPress: onLongPress,
         child: Padding(
           padding: const EdgeInsets.all(8),
           child: Row(
             children: [
+              Container(
+                width: 4,
+                height: 56,
+                margin: const EdgeInsets.only(right: 8),
+                decoration: BoxDecoration(
+                  color: kindColor,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
               ClipRRect(
                 borderRadius: BorderRadius.circular(10),
                 child: SizedBox(

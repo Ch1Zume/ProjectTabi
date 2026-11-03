@@ -460,6 +460,7 @@ class PointDetailSheet extends StatelessWidget {
     return switch (point.source) {
       PointSource.anitabi => 'Anitabi / ${point.referenceLabel}',
       PointSource.manual => '手动录入 / ${point.referenceLabel}',
+      PointSource.travel => '旅行照片 / ${point.referenceLabel}',
     };
   }
 

@@ -9,7 +9,9 @@ enum VisitStatus { pending, current, completed }
 
 enum WorkSource { bangumi, manual }
 
-enum PointSource { manual, anitabi }
+/// Where a point came from. [travel] marks places of ordinary travel photos,
+/// kept in the travel journal plan rather than a pilgrimage plan.
+enum PointSource { manual, anitabi, travel }
 
 enum PlanGroupOrderMode { unordered, manual }
 

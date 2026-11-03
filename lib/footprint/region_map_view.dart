@@ -14,9 +14,41 @@ import '../records/visit_record_photo_stub.dart'
 import 'country_colors.dart';
 import 'footprint_data.dart';
 import 'region_data.dart';
+import 'region_photo_layer.dart';
+import 'travel_photo_files.dart';
 
 /// Insets that keep fitted regions clear of the breadcrumb and summary card.
 const EdgeInsets footprintMapPadding = EdgeInsets.fromLTRB(20, 76, 20, 112);
+
+/// Pale paper-like palette of the division maps: unvisited regions are
+/// muted blocks separated by background-coloured borders.
+class FootprintMapPalette {
+  const FootprintMapPalette._({
+    required this.background,
+    required this.land,
+    required this.contextLand,
+    required this.border,
+  });
+
+  factory FootprintMapPalette.current() => AppColors.isDark
+      ? const FootprintMapPalette._(
+          background: Color(0xFF15171A),
+          land: Color(0xFF2B2E33),
+          contextLand: Color(0xFF212327),
+          border: Color(0xFF15171A),
+        )
+      : const FootprintMapPalette._(
+          background: Color(0xFFF6F4F0),
+          land: Color(0xFFE4E0DA),
+          contextLand: Color(0xFFEDEAE5),
+          border: Color(0xFFFFFFFF),
+        );
+
+  final Color background;
+  final Color land;
+  final Color contextLand;
+  final Color border;
+}
 
 /// A 2D step of the footprint map: a country or province split into its
 /// divisions, or a city leaf shown on the real map with record markers.
@@ -47,16 +79,26 @@ class RegionMapView extends StatefulWidget {
     required this.level,
     required this.index,
     required this.settings,
+    required this.photoPicks,
+    required this.travelColor,
+    required this.pilgrimageColor,
     required this.onEnterChild,
     required this.onOpenEntries,
+    required this.onLongPressRegion,
     super.key,
   });
 
   final FootprintMapLevel level;
   final FootprintIndex index;
   final AppSettings settings;
+
+  /// Record ids chosen as representative photos, keyed by region id.
+  final Map<String, String> photoPicks;
+  final Color travelColor;
+  final Color pilgrimageColor;
   final ValueChanged<RegionFeature> onEnterChild;
   final ValueChanged<List<FootprintEntry>> onOpenEntries;
+  final ValueChanged<RegionFeature> onLongPressRegion;
 
   @override
   State<RegionMapView> createState() => _RegionMapViewState();
@@ -73,10 +115,17 @@ class _RegionMapViewState extends State<RegionMapView>
   MapCamera? _flightTo;
   bool _entering = false;
 
+  late FootprintMapPalette _palette;
   late List<Polygon> _contextPolygons;
   late List<Polygon> _regionPolygons;
   late List<Polyline> _lines;
   late List<_PointEntries> _points;
+
+  /// Decoded representative photos by record id. Regions whose photo is
+  /// missing or still loading fall back to their colour.
+  final Map<String, ImageInfo> _photos = {};
+  final Set<String> _requestedPhotos = {};
+  List<RegionPhotoFill> _photoFills = const [];
 
   @override
   void initState() {
@@ -88,7 +137,10 @@ class _RegionMapViewState extends State<RegionMapView>
   void didUpdateWidget(RegionMapView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.level, widget.level) ||
-        !identical(oldWidget.index, widget.index)) {
+        !identical(oldWidget.index, widget.index) ||
+        oldWidget.photoPicks != widget.photoPicks ||
+        oldWidget.travelColor != widget.travelColor ||
+        oldWidget.pilgrimageColor != widget.pilgrimageColor) {
       _buildShapes();
     }
   }
@@ -97,6 +149,9 @@ class _RegionMapViewState extends State<RegionMapView>
   void dispose() {
     _flight.dispose();
     _mapController.dispose();
+    for (final info in _photos.values) {
+      info.dispose();
+    }
     super.dispose();
   }
 
@@ -108,16 +163,14 @@ class _RegionMapViewState extends State<RegionMapView>
     final level = widget.level;
     final index = widget.index;
     final color = _regionColor;
-    final lineColor = AppColors.textPrimary;
+    final palette = _palette = FootprintMapPalette.current();
 
     _contextPolygons = [
       for (final feature in level.context)
         ..._polygonsOf(
           feature,
-          fill: index.isVisited(feature.id)
-              ? countryColor(feature.countryCode).withValues(alpha: 0.18)
-              : null,
-          border: lineColor.withValues(alpha: 0.14),
+          fill: palette.contextLand,
+          border: palette.border,
           width: 0.8,
         ),
     ];
@@ -136,16 +189,10 @@ class _RegionMapViewState extends State<RegionMapView>
             child,
             fill: index.isVisited(child.id)
                 ? color.withValues(alpha: 0.8)
-                : AppColors.surface.withValues(alpha: 0.35),
-            border: lineColor.withValues(alpha: 0.42),
-            width: 0.9,
+                : palette.land,
+            border: palette.border,
+            width: 1,
           ),
-        // Region outline on top of the division borders.
-        ..._polygonsOf(
-          _region,
-          border: lineColor.withValues(alpha: 0.7),
-          width: 1.6,
-        ),
       ];
     }
 
@@ -153,7 +200,7 @@ class _RegionMapViewState extends State<RegionMapView>
       for (final line in level.lines)
         Polyline(
           points: line.toLatLngs(),
-          color: lineColor.withValues(alpha: 0.55),
+          color: AppColors.textSecondary.withValues(alpha: 0.7),
           strokeWidth: 1.4,
         ),
     ];
@@ -172,6 +219,77 @@ class _RegionMapViewState extends State<RegionMapView>
       }
     }
     _points = grouped.values.toList(growable: false);
+    _updatePhotoFills();
+  }
+
+  /// Representative entry per visited division.
+  Map<RegionFeature, FootprintEntry> get _representatives {
+    final result = <RegionFeature, FootprintEntry>{};
+    if (widget.level.isLeaf) {
+      return result;
+    }
+    for (final child in widget.level.children) {
+      final entry = widget.index.representativeOf(child.id, widget.photoPicks);
+      if (entry != null) {
+        result[child] = entry;
+      }
+    }
+    return result;
+  }
+
+  void _updatePhotoFills() {
+    final fills = <RegionPhotoFill>[];
+    for (final MapEntry(key: region, value: entry)
+        in _representatives.entries) {
+      final info = _photos[entry.record.id];
+      if (info != null) {
+        fills.add(RegionPhotoFill(region: region, image: info.image));
+      } else {
+        _loadPhoto(entry);
+      }
+    }
+    _photoFills = fills;
+  }
+
+  Future<void> _loadPhoto(FootprintEntry entry) async {
+    final id = entry.record.id;
+    if (!_requestedPhotos.add(id)) {
+      return;
+    }
+    final path = resolveVisitRecordDisplayPhotoPath(entry.record);
+    if (path == null) {
+      return;
+    }
+    final provider = await loadRecordPhotoImage(path);
+    if (provider == null || !mounted) {
+      return;
+    }
+    // Region fills are small on screen; decoding full photos would waste
+    // memory with dozens of regions.
+    final stream = ResizeImage(
+      provider,
+      width: 720,
+      policy: ResizeImagePolicy.fit,
+      allowUpscaling: false,
+    ).resolve(createLocalImageConfiguration(context));
+    late final ImageStreamListener listener;
+    listener = ImageStreamListener(
+      (info, _) {
+        stream.removeListener(listener);
+        if (!mounted) {
+          info.dispose();
+          return;
+        }
+        setState(() {
+          _photos[id]?.dispose();
+          _photos[id] = info.clone();
+          info.dispose();
+          _updatePhotoFills();
+        });
+      },
+      onError: (_, _) => stream.removeListener(listener),
+    );
+    stream.addListener(listener);
   }
 
   List<Polygon> _polygonsOf(
@@ -220,18 +338,20 @@ class _RegionMapViewState extends State<RegionMapView>
     await _flight.forward(from: 0);
   }
 
-  Future<void> _handleTap(LatLng position) async {
-    final level = widget.level;
-    if (level.isLeaf || _entering) {
-      return;
-    }
-    RegionFeature? hit;
-    for (final child in level.children) {
+  RegionFeature? _childAt(LatLng position) {
+    for (final child in widget.level.children) {
       if (child.contains(position.longitude, position.latitude)) {
-        hit = child;
-        break;
+        return child;
       }
     }
+    return null;
+  }
+
+  Future<void> _handleTap(LatLng position) async {
+    if (widget.level.isLeaf || _entering) {
+      return;
+    }
+    final hit = _childAt(position);
     if (hit == null) {
       return;
     }
@@ -240,6 +360,13 @@ class _RegionMapViewState extends State<RegionMapView>
     _entering = false;
     if (mounted) {
       widget.onEnterChild(hit);
+    }
+  }
+
+  void _handleLongPress(LatLng position) {
+    final hit = widget.level.isLeaf ? null : _childAt(position);
+    if (hit != null && widget.index.isVisited(hit.id)) {
+      widget.onLongPressRegion(hit);
     }
   }
 
@@ -256,24 +383,28 @@ class _RegionMapViewState extends State<RegionMapView>
         ),
         backgroundColor: level.isLeaf
             ? AppColors.surfaceMuted
-            : Colors.transparent,
+            : _palette.background,
         minZoom: 1.5,
         maxZoom: widget.settings.mapMaxZoom.toDouble(),
         interactionOptions: const InteractionOptions(
           flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
         ),
         onTap: (_, position) => _handleTap(position),
+        onLongPress: (_, position) => _handleLongPress(position),
       ),
       children: [
         if (level.isLeaf) configuredMapTileLayer(widget.settings),
-        if (_contextPolygons.isNotEmpty)
+        if (_contextPolygons.isNotEmpty && !level.isLeaf)
           PolygonLayer(polygons: _contextPolygons, simplificationTolerance: 0),
         PolygonLayer(polygons: _regionPolygons, simplificationTolerance: 0),
+        if (_photoFills.isNotEmpty)
+          RegionPhotoLayer(fills: _photoFills, borderColor: _palette.border),
         if (_lines.isNotEmpty) PolylineLayer(polylines: _lines),
         if (level.isLeaf)
           _RecordMarkerLayer(
             points: _points,
-            color: _regionColor,
+            travelColor: widget.travelColor,
+            pilgrimageColor: widget.pilgrimageColor,
             onOpenEntries: widget.onOpenEntries,
           )
         else
@@ -281,6 +412,7 @@ class _RegionMapViewState extends State<RegionMapView>
             children: level.children,
             index: widget.index,
             color: _regionColor,
+            photoRegionIds: {for (final fill in _photoFills) fill.region.id},
           ),
       ],
     );
@@ -300,17 +432,24 @@ class _RegionLabelLayer extends StatelessWidget {
     required this.children,
     required this.index,
     required this.color,
+    required this.photoRegionIds,
   });
 
   final List<RegionFeature> children;
   final FootprintIndex index;
   final Color color;
 
+  /// Regions showing a photo carry no label, like a photo collage map.
+  final Set<String> photoRegionIds;
+
   @override
   Widget build(BuildContext context) {
     final camera = MapCamera.of(context);
     final markers = <Marker>[];
     for (final child in children) {
+      if (photoRegionIds.contains(child.id)) {
+        continue;
+      }
       final visited = index.isVisited(child.id);
       final width = _screenWidth(camera, child);
       if (width <= child.name.length * 13 + 40) {
@@ -447,13 +586,18 @@ class _PointEntries {
 class _RecordMarkerLayer extends StatelessWidget {
   const _RecordMarkerLayer({
     required this.points,
-    required this.color,
+    required this.travelColor,
+    required this.pilgrimageColor,
     required this.onOpenEntries,
   });
 
   final List<_PointEntries> points;
-  final Color color;
+  final Color travelColor;
+  final Color pilgrimageColor;
   final ValueChanged<List<FootprintEntry>> onOpenEntries;
+
+  Color _colorOf(FootprintEntry entry) =>
+      entry.kind == FootprintKind.travel ? travelColor : pilgrimageColor;
 
   @override
   Widget build(BuildContext context) {
@@ -475,7 +619,7 @@ class _RecordMarkerLayer extends StatelessWidget {
               height: 52,
               child: _RecordPhotoMarker(
                 entries: cluster.items.single.entries,
-                color: color,
+                color: _colorOf(cluster.items.single.entries.first),
                 onTap: () => onOpenEntries(cluster.items.single.entries),
               ),
             )
@@ -540,7 +684,7 @@ class _RecordPhotoMarker extends StatelessWidget {
                 border: Border.all(color: Colors.white, width: 2.5),
                 boxShadow: [
                   BoxShadow(
-                    color: color.withValues(alpha: 0.45),
+                    color: color,
                     spreadRadius: 3,
                   ),
                   const BoxShadow(
